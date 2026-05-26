@@ -163,7 +163,7 @@ def _resolve_signal_outcome(sig: dict) -> dict | None:
     if df.empty:
         return None
 
-    current_price = float(df["Close"].squeeze().iloc[-1])
+    current_price = float(df["Close"].iloc[-1])
     tp = sig.get("tp")
     sl = sig.get("sl")
     age_hours = (now - sent_at).total_seconds() / 3600
@@ -471,7 +471,7 @@ async def monitor_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             df = yf.download(sym, period="1d", interval="5m", progress=False, auto_adjust=True)
             if not df.empty:
-                prices[sym] = float(df["Close"].squeeze().iloc[-1])
+                prices[sym] = float(df["Close"].iloc[-1])
         except Exception as e:
             logger.warning(f"Price fetch failed for {sym}: {e}")
 
@@ -762,7 +762,7 @@ async def close_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     lang = pref["lang"]
 
     df = yf.download(symbol, period="1d", interval="5m", progress=False, auto_adjust=True)
-    exit_price = float(df["Close"].squeeze().iloc[-1]) if not df.empty else 0.0
+    exit_price = float(df["Close"].iloc[-1]) if not df.empty else 0.0
     result = close_position(user_id, symbol, exit_price)
     await query.edit_message_reply_markup(reply_markup=None)
 
@@ -837,7 +837,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         for p in positions:
             try:
                 df = yf.download(p["symbol"], period="1d", interval="5m", progress=False, auto_adjust=True)
-                current = float(df["Close"].squeeze().iloc[-1]) if not df.empty else p["entry_price"]
+                current = float(df["Close"].iloc[-1]) if not df.empty else p["entry_price"]
             except Exception:
                 current = p["entry_price"]
             pct = (current - p["entry_price"]) / p["entry_price"] * 100
@@ -1173,7 +1173,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     for p in positions:
         try:
             df = yf.download(p["symbol"], period="1d", interval="5m", progress=False, auto_adjust=True)
-            current = float(df["Close"].squeeze().iloc[-1]) if not df.empty else p["entry_price"]
+            current = float(df["Close"].iloc[-1]) if not df.empty else p["entry_price"]
         except Exception:
             current = p["entry_price"]
         pct = (current - p["entry_price"]) / p["entry_price"] * 100
@@ -1234,7 +1234,7 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     symbol = context.args[0].upper()
     df = yf.download(symbol, period="1d", interval="5m", progress=False, auto_adjust=True)
-    exit_price = float(df["Close"].squeeze().iloc[-1]) if not df.empty else 0.0
+    exit_price = float(df["Close"].iloc[-1]) if not df.empty else 0.0
     result = close_position(str(uid), symbol, exit_price)
     if result:
         pnl = result["pnl_pct"]
