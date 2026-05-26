@@ -182,7 +182,7 @@ def run_bootstrap(symbols: list[str], years: int = 2,
         logger.info(f"[bootstrap] {symbol}: training on {len(training_samples)} non-neutral samples")
 
         model = StockModel(symbol)
-        ok = model.train(outcome_data=training_samples)
+        ok = model.train(outcome_data=training_samples, _log=False)
 
         if ok:
             log_training(

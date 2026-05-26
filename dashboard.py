@@ -220,10 +220,11 @@ _HTML = """<!DOCTYPE html>
             <table class="table table-dark table-hover mb-0" id="ml-table">
               <thead><tr>
                 <th>Symbol</th>
+                <th title="Historical win rate from bootstrap training">Bootstrap Win Rate</th>
                 <th>AI Signals</th><th>AI Accuracy</th>
                 <th>STRONG Signals</th><th>STRONG Accuracy</th>
                 <th>Rule Only</th><th>Rule Accuracy</th>
-                <th>Last Trained</th><th>Train Samples</th><th>Outcome Samples</th><th>Runs</th>
+                <th>Last Trained</th><th>Train Samples</th><th>Runs</th>
               </tr></thead>
               <tbody id="ml-body"></tbody>
             </table>
@@ -807,18 +808,21 @@ async function refreshML() {
     const tr = d.training;
     const trainedAt = tr ? new Date(tr.trained_at+'Z').toLocaleString() : '—';
     const samples   = tr ? tr.train_samples : '—';
-    const outcomes  = tr ? tr.outcome_samples : '—';
+    const bwr = d.bootstrap_win_rate != null
+      ? `<span style="color:${d.bootstrap_win_rate>=54?'#4ade80':d.bootstrap_win_rate>=50?'#fbbf24':'#f87171'}">${d.bootstrap_win_rate}%</span>
+         <span style="color:#555;font-size:.72rem"> (${d.bootstrap_correct||0}✓ ${d.bootstrap_incorrect||0}✗)</span>`
+      : '<span style="color:#555">—</span>';
     return `<tr>
       <td><span class="sym-tag">${sym}</span></td>
+      <td>${bwr}</td>
       <td>${d.ai_total||0}</td>
-      <td>${d.ai_total ? accBar(d.ai_accuracy, d.ai_total) : '<span style="color:#555">no data</span>'}</td>
+      <td>${d.ai_total >= 5 ? accBar(d.ai_accuracy, d.ai_total) : '<span style="color:#555">need 5+ signals</span>'}</td>
       <td>${d.strong_total||0}</td>
-      <td>${d.strong_total ? accBar(d.strong_accuracy, d.strong_total) : '<span style="color:#555">no data</span>'}</td>
+      <td>${d.strong_total >= 3 ? accBar(d.strong_accuracy, d.strong_total) : '<span style="color:#555">need 3+ signals</span>'}</td>
       <td>${d.rule_total||0}</td>
-      <td>${d.rule_total ? accBar(d.rule_accuracy, d.rule_total) : '<span style="color:#555">no data</span>'}</td>
+      <td>${d.rule_total >= 3 ? accBar(d.rule_accuracy, d.rule_total) : '<span style="color:#555">need 3+ signals</span>'}</td>
       <td style="font-size:.75rem;color:#8b8fa8">${trainedAt}</td>
       <td>${samples}</td>
-      <td>${outcomes}</td>
       <td>${d.train_runs||0}</td>
     </tr>`;
   }).join('');
@@ -1078,9 +1082,13 @@ async function refreshActivity() {
   const health = data.symbol_health || {};
   document.getElementById('health-cards').innerHTML =
     Object.entries(health).map(([sym, h]) => {
-      const accColor = h.recent_acc >= 60 ? '#4ade80' : (h.recent_acc >= 50 ? '#fbbf24' : '#f87171');
-      const barW = Math.min(h.recent_acc, 100);
+      const hasData = h.recent_count > 0;
+      const accColor = !hasData ? '#555' : (h.recent_acc >= 60 ? '#4ade80' : (h.recent_acc >= 50 ? '#fbbf24' : '#f87171'));
+      const barW = hasData ? Math.min(h.recent_acc, 100) : 0;
       const barCls = h.recent_acc >= 60 ? 'accuracy-bar-high' : (h.recent_acc >= 50 ? 'accuracy-bar-mid' : 'accuracy-bar-low');
+      const accLabel = hasData
+        ? `<strong style="color:${accColor}">${h.recent_acc}%</strong> <span style="color:#555">(${h.recent_count})</span>`
+        : `<span style="color:#555">no live data yet</span>`;
       return `<div class="col-6 col-md-4 col-lg-3">
         <div class="health-card">
           <div class="d-flex justify-content-between align-items-center mb-2">
@@ -1091,13 +1099,13 @@ async function refreshActivity() {
             <div class="progress-bar ${barCls}" style="width:${barW}%"></div>
           </div>
           <div class="d-flex justify-content-between" style="font-size:.75rem;color:#8b8fa8">
-            <span>Recent acc: <strong style="color:${accColor}">${h.recent_acc}%</strong> (${h.recent_count})</span>
-            <span>All: ${h.all_acc}%</span>
+            <span>Live acc: ${accLabel}</span>
+            ${hasData ? `<span>All: ${h.all_acc}%</span>` : ''}
           </div>
           <div class="mt-2" style="font-size:.72rem;color:#555">
             <span>📊 ${h.total_outcomes} outcomes · ⏳ ${h.pending} pending</span><br>
             <span>🕒 Trained ${modelAge(h.last_trained)} · Checked ${modelAge(h.last_checked)}</span><br>
-            <span>✅ ${h.recent_successes} success · ❌ ${h.recent_failures} failure</span>
+            ${hasData ? `<span>✅ ${h.recent_successes} success · ❌ ${h.recent_failures} failure</span>` : '<span>Accumulating live signals…</span>'}
           </div>
         </div>
       </div>`;

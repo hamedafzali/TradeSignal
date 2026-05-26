@@ -119,7 +119,7 @@ class StockModel:
             return True
         return (time.time() - self.trained_at) > RETRAIN_EVERY
 
-    def train(self, outcome_data: list[dict] | None = None) -> bool:
+    def train(self, outcome_data: list[dict] | None = None, _log: bool = True) -> bool:
         """
         Train on 60 days of hourly data, then blend in real outcome samples.
         outcome_data: list of {"features": {col: val, ...}, "label": int}
@@ -171,13 +171,14 @@ class StockModel:
                 self.outcome_count_at_train = self.outcome_samples
             self._save()
 
-            # Persist to DB for dashboard reporting
-            try:
-                from database import log_training
-                trigger = "outcomes" if (outcome_data and len(outcome_data) >= 3) else "time"
-                log_training(self.symbol, len(X), self.outcome_samples, trigger=trigger)
-            except Exception:
-                pass
+            # Persist to DB for dashboard reporting (skipped when caller handles logging)
+            if _log:
+                try:
+                    from database import log_training
+                    trigger = "outcomes" if (outcome_data and len(outcome_data) >= 3) else "time"
+                    log_training(self.symbol, len(X), self.outcome_samples, trigger=trigger)
+                except Exception:
+                    pass
 
             logger.info(f"[ML] {self.symbol} trained on {len(X)} samples")
             return True

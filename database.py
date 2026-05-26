@@ -874,14 +874,25 @@ def get_ml_accuracy_stats() -> dict:
             ORDER BY sent_at
         """).fetchall()
 
-        # Training log — last entry per symbol
+        # Training log — last bootstrap entry per symbol (for win_rate) + last overall entry
         train_rows = conn.execute("""
-            SELECT symbol, trained_at, train_samples, outcome_samples
+            SELECT symbol, trained_at, train_samples, outcome_samples,
+                   win_rate, correct_count, incorrect_count, trigger
             FROM ml_training_log
             WHERE id IN (
                 SELECT MAX(id) FROM ml_training_log GROUP BY symbol
             )
         """).fetchall()
+        bootstrap_rows = conn.execute("""
+            SELECT symbol, win_rate, correct_count, incorrect_count, train_samples
+            FROM ml_training_log
+            WHERE trigger = 'bootstrap'
+              AND id IN (
+                SELECT MAX(id) FROM ml_training_log
+                WHERE trigger = 'bootstrap' GROUP BY symbol
+              )
+        """).fetchall()
+        bootstrap_stats = {r["symbol"]: dict(r) for r in bootstrap_rows}
         training = {r["symbol"]: dict(r) for r in train_rows}
         active_symbols = set(get_active_symbols())
         all_symbols = set(active_symbols) | set(training.keys())
@@ -953,9 +964,15 @@ def get_ml_accuracy_stats() -> dict:
             )
             d["training"] = training.get(sym)
             d["train_runs"] = run_map.get(sym, 0)
+            bs = bootstrap_stats.get(sym)
+            d["bootstrap_win_rate"] = bs["win_rate"] if bs else None
+            d["bootstrap_correct"] = bs["correct_count"] if bs else None
+            d["bootstrap_incorrect"] = bs["incorrect_count"] if bs else None
+            d["bootstrap_samples"] = bs["train_samples"] if bs else None
 
         for sym in sorted(all_symbols):
             if sym not in per_symbol:
+                bs = bootstrap_stats.get(sym)
                 per_symbol[sym] = {
                     "ai_total": 0, "ai_correct": 0,
                     "strong_total": 0, "strong_correct": 0,
@@ -965,6 +982,10 @@ def get_ml_accuracy_stats() -> dict:
                     "rule_accuracy": None,
                     "training": training.get(sym),
                     "train_runs": run_map.get(sym, 0),
+                    "bootstrap_win_rate": bs["win_rate"] if bs else None,
+                    "bootstrap_correct": bs["correct_count"] if bs else None,
+                    "bootstrap_incorrect": bs["incorrect_count"] if bs else None,
+                    "bootstrap_samples": bs["train_samples"] if bs else None,
                 }
 
         for lbl, b in buckets_global.items():
@@ -972,16 +993,17 @@ def get_ml_accuracy_stats() -> dict:
                 round(b["correct"] / b["total"] * 100, 1) if b["total"] > 0 else None
             )
 
-        trained_model_count = sum(1 for sym in all_symbols if training.get(sym))
+        trained_model_count = sum(1 for sym in active_symbols if training.get(sym))
         ai_totals = [d["ai_total"] for d in per_symbol.values()]
-        ai_acc_values = [d["ai_accuracy"] for d in per_symbol.values() if d["ai_accuracy"] is not None]
+        ai_acc_values = [d["ai_accuracy"] for d in per_symbol.values()
+                         if d["ai_accuracy"] is not None and d["ai_total"] >= 5]
         return {
             "per_symbol": per_symbol,
             "confidence_buckets": [
                 {"label": lbl, **buckets_global[lbl]} for lbl in bucket_labels
             ],
             "summary": {
-                "active_symbol_count": len(all_symbols),
+                "active_symbol_count": len(active_symbols),
                 "trained_model_count": trained_model_count,
                 "ai_resolved_signals": sum(ai_totals),
                 "avg_ai_accuracy": round(sum(ai_acc_values) / len(ai_acc_values), 1) if ai_acc_values else None,
