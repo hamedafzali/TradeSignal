@@ -428,21 +428,25 @@ async def process_action_requests(context: ContextTypes.DEFAULT_TYPE) -> None:
                     raise RuntimeError(f"{symbol} retrain failed")
                 note = f"{symbol} retrained"
             elif action == "run_bootstrap":
-                symbols_to_boot = [symbol] if symbol else _get_symbols()
-                if not symbols_to_boot:
-                    raise ValueError("no symbols to bootstrap")
-                job_id = start_training_job("bootstrap", total_symbols=len(symbols_to_boot))
+                # Guard: refuse if a bootstrap thread is already alive
+                if any(t.name == "bootstrap" for t in threading.enumerate()):
+                    note = "bootstrap already running — wait for it to finish"
+                else:
+                    symbols_to_boot = [symbol] if symbol else _get_symbols()
+                    if not symbols_to_boot:
+                        raise ValueError("no symbols to bootstrap")
+                    job_id = start_training_job("bootstrap", total_symbols=len(symbols_to_boot))
 
-                def _run():
-                    try:
-                        from bootstrap import run_bootstrap
-                        run_bootstrap(symbols_to_boot, years=2, job_id=job_id)
-                    except Exception as exc:
-                        finish_training_job(job_id, status="failed", note=str(exc)[:200])
-                        logger.error(f"[bootstrap] Thread error: {exc}")
+                    def _run(jid=job_id, syms=symbols_to_boot):
+                        try:
+                            from bootstrap import run_bootstrap
+                            run_bootstrap(syms, years=2, job_id=jid)
+                        except Exception as exc:
+                            finish_training_job(jid, status="failed", note=str(exc)[:200])
+                            logger.error(f"[bootstrap] thread error: {exc}", exc_info=True)
 
-                threading.Thread(target=_run, daemon=True, name="bootstrap").start()
-                note = f"bootstrap started in background (job_id={job_id})"
+                    threading.Thread(target=_run, daemon=True, name="bootstrap").start()
+                    note = f"bootstrap started in background (job_id={job_id})"
             else:
                 raise ValueError(f"unsupported action {action}")
             complete_action_request(req["id"], "completed", note)
