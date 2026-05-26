@@ -24,6 +24,7 @@ from telegram.ext import (
 from backtest import format_backtest_message, run_backtest
 from database import (
     close_position,
+    get_active_symbols,
     get_all_open_positions,
     get_all_subscriber_ids,
     get_last_signal_action,
@@ -40,6 +41,7 @@ from database import (
     log_signal,
     log_user,
     open_position,
+    seed_symbols,
     subscribe_user,
     unsubscribe_user,
     update_outcome,
@@ -73,6 +75,26 @@ logger = logging.getLogger(__name__)
 
 models: dict[str, StockModel] = {s: StockModel(s) for s in SYMBOLS}
 BOT_USERNAME = ""
+
+
+def _get_symbols() -> list[str]:
+    """Active symbol list from DB; falls back to env SYMBOLS if DB is empty."""
+    db_syms = get_active_symbols()
+    return db_syms if db_syms else SYMBOLS
+
+
+async def refresh_symbols(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sync models dict with the current active symbols from the DB."""
+    current = set(_get_symbols())
+    existing = set(models.keys())
+    added = current - existing
+    removed = existing - current
+    for sym in added:
+        models[sym] = StockModel(sym)
+        logger.info(f"[symbols] Added model for {sym}")
+    for sym in removed:
+        del models[sym]
+        logger.info(f"[symbols] Removed model for {sym}")
 
 
 # ── ML helpers ────────────────────────────────────────────────────────────────
@@ -225,7 +247,7 @@ async def monitor_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
     await _ensure_models_trained(context.bot)
 
-    for symbol in SYMBOLS:
+    for symbol in _get_symbols():
         # Skip non-crypto during closed market
         if not is_crypto(symbol):
             session = market_session(symbol)
@@ -601,7 +623,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "after": "🌙 After-hours", "closed": "⛔ Market closed",
         }
         lines = []
-        for symbol in SYMBOLS:
+        for symbol in _get_symbols():
             try:
                 interval = "1h" if is_crypto(symbol) else "5m"
                 period = "30d" if is_crypto(symbol) else "5d"
@@ -664,7 +686,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             # Show subscribe buttons for each symbol
             buttons = [
                 InlineKeyboardButton(sym, callback_data=f"sub:{sym}")
-                for sym in SYMBOLS
+                for sym in _get_symbols()
             ]
             rows = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
             await query.message.reply_text(
@@ -676,7 +698,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     elif action == "backtest_prompt":
         buttons = [
             InlineKeyboardButton(sym, callback_data=f"bt:{sym}")
-            for sym in SYMBOLS
+            for sym in _get_symbols()
         ]
         rows = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
         await query.message.reply_text(
@@ -769,7 +791,7 @@ async def text_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         elif action == "backtest_prompt":
             buttons = [
                 InlineKeyboardButton(sym, callback_data=f"bt:{sym}")
-                for sym in SYMBOLS
+                for sym in _get_symbols()
             ]
             rows = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
             await update.message.reply_text(
@@ -1003,7 +1025,7 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"🔍 Scanning... {session_labels.get(session, '')}")
 
     lines = []
-    for symbol in SYMBOLS:
+    for symbol in _get_symbols():
         try:
             interval = "1h" if is_crypto(symbol) else "5m"
             period = "30d" if is_crypto(symbol) else "5d"
@@ -1020,8 +1042,8 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             macd_dir = ("↑" if float(macd_line.iloc[-1]) > float(sig_line.iloc[-1]) else "↓")
             ema_dir = ("↑" if float(ema9.iloc[-1]) > float(ema21.iloc[-1]) else "↓")
             rsi_label = ("🔴 OB" if rsi_val > 60 else "🟢 OS" if rsi_val < 40 else "")
-            ml_result = models[symbol].predict(df)
-            ai_buy = ml_result.get("buy_prob")
+            model = models.get(symbol)
+            ai_buy = model.predict(df).get("buy_prob") if model else None
             ai_text = f"  ·  AI `{ai_buy*100:.0f}%`" if ai_buy is not None else ""
             crypto_tag = " ₿" if is_crypto(symbol) else ""
             lines.append(
@@ -1082,6 +1104,12 @@ async def post_init(app: Application) -> None:
     me = await app.bot.get_me()
     BOT_USERNAME = me.username
     init_db()
+    # Seed symbols from env into DB on first run (no-op if already present)
+    seed_symbols(SYMBOLS)
+    # Sync models dict with DB in case symbols were added/removed via dashboard
+    for sym in get_active_symbols():
+        if sym not in models:
+            models[sym] = StockModel(sym)
 
     # Register commands so they appear in Telegram's "/" command list
     await app.bot.set_my_commands([
@@ -1145,6 +1173,8 @@ def main() -> None:
         filters.TEXT & ~filters.COMMAND, text_button_handler
     ))
 
+    # Refresh symbol list from DB every 5 minutes
+    app.job_queue.run_repeating(refresh_symbols, interval=300, first=30)
     # Scan every SCAN_INTERVAL seconds
     app.job_queue.run_repeating(scan_and_alert, interval=SCAN_INTERVAL, first=10)
     # Check pending outcomes every hour

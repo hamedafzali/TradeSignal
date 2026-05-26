@@ -72,6 +72,21 @@ def init_db() -> None:
                 symbol  TEXT NOT NULL,
                 PRIMARY KEY (user_id, symbol)
             );
+
+            CREATE TABLE IF NOT EXISTS symbols (
+                symbol     TEXT PRIMARY KEY,
+                active     INTEGER DEFAULT 1,
+                added_at   TEXT NOT NULL,
+                added_by   TEXT DEFAULT 'admin'
+            );
+
+            CREATE TABLE IF NOT EXISTS ml_training_log (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol       TEXT NOT NULL,
+                trained_at   TEXT NOT NULL,
+                train_samples INTEGER,
+                outcome_samples INTEGER DEFAULT 0
+            );
         """)
         # Migrate existing positions table if tp/sl columns missing
         cols = [r[1] for r in conn.execute("PRAGMA table_info(positions)").fetchall()]
@@ -388,6 +403,187 @@ def get_weekly_stats() -> dict:
         "accuracy": accuracy,
         "per_symbol": per_symbol,
     }
+
+
+# ── Symbol management ─────────────────────────────────────────────────────────
+
+def seed_symbols(symbols: list[str]) -> None:
+    """Insert symbols from env on first run — skip if already in DB."""
+    now = datetime.utcnow().isoformat()
+    with _conn() as conn:
+        for sym in symbols:
+            conn.execute("""
+                INSERT OR IGNORE INTO symbols (symbol, active, added_at, added_by)
+                VALUES (?, 1, ?, 'env')
+            """, (sym.upper(), now))
+
+
+def get_active_symbols() -> list[str]:
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT symbol FROM symbols WHERE active = 1 ORDER BY added_at"
+        ).fetchall()
+        return [r["symbol"] for r in rows]
+
+
+def add_symbol(symbol: str, added_by: str = "admin") -> bool:
+    """Returns True if newly added, False if already exists."""
+    sym = symbol.upper()
+    now = datetime.utcnow().isoformat()
+    with _conn() as conn:
+        existing = conn.execute(
+            "SELECT active FROM symbols WHERE symbol = ?", (sym,)
+        ).fetchone()
+        if existing:
+            if not existing["active"]:
+                conn.execute(
+                    "UPDATE symbols SET active = 1, added_at = ? WHERE symbol = ?",
+                    (now, sym)
+                )
+                return True
+            return False
+        conn.execute(
+            "INSERT INTO symbols (symbol, active, added_at, added_by) VALUES (?, 1, ?, ?)",
+            (sym, now, added_by)
+        )
+        return True
+
+
+def remove_symbol(symbol: str) -> bool:
+    """Soft-delete (sets active=0). Returns True if found."""
+    sym = symbol.upper()
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT active FROM symbols WHERE symbol = ?", (sym,)
+        ).fetchone()
+        if not row or not row["active"]:
+            return False
+        conn.execute("UPDATE symbols SET active = 0 WHERE symbol = ?", (sym,))
+        return True
+
+
+def get_all_symbols_with_status() -> list[dict]:
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT symbol, active, added_at, added_by FROM symbols ORDER BY added_at"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ── ML training log ───────────────────────────────────────────────────────────
+
+def log_training(symbol: str, train_samples: int, outcome_samples: int = 0) -> None:
+    with _conn() as conn:
+        conn.execute("""
+            INSERT INTO ml_training_log (symbol, trained_at, train_samples, outcome_samples)
+            VALUES (?, ?, ?, ?)
+        """, (symbol, datetime.utcnow().isoformat(), train_samples, outcome_samples))
+
+
+def get_ml_accuracy_stats() -> dict:
+    """
+    Returns per-symbol ML accuracy derived from resolved signals that had
+    an AI confidence value, plus the training log.
+    """
+    with _conn() as conn:
+        # Per-symbol AI accuracy: signals where AI had a view and we know the outcome
+        rows = conn.execute("""
+            SELECT symbol, action, ai_confidence, outcome, strength
+            FROM signals
+            WHERE outcome IN ('correct', 'incorrect')
+              AND ai_confidence IS NOT NULL
+            ORDER BY sent_at
+        """).fetchall()
+
+        # Training log — last entry per symbol
+        train_rows = conn.execute("""
+            SELECT symbol, trained_at, train_samples, outcome_samples
+            FROM ml_training_log
+            WHERE id IN (
+                SELECT MAX(id) FROM ml_training_log GROUP BY symbol
+            )
+        """).fetchall()
+        training = {r["symbol"]: dict(r) for r in train_rows}
+
+        # Total training runs per symbol
+        run_counts = conn.execute("""
+            SELECT symbol, COUNT(*) AS runs FROM ml_training_log GROUP BY symbol
+        """).fetchall()
+        run_map = {r["symbol"]: r["runs"] for r in run_counts}
+
+        # Confidence buckets: [0.65-0.70), [0.70-0.80), [0.80-0.90), [0.90-1.0]
+        buckets_def = [(0.65, 0.70), (0.70, 0.80), (0.80, 0.90), (0.90, 1.01)]
+        bucket_labels = ["65–70%", "70–80%", "80–90%", "90%+"]
+
+        per_symbol: dict[str, dict] = {}
+        buckets_global: dict[str, dict] = {
+            lbl: {"total": 0, "correct": 0} for lbl in bucket_labels
+        }
+
+        for r in rows:
+            sym = r["symbol"]
+            if sym not in per_symbol:
+                per_symbol[sym] = {
+                    "ai_total": 0, "ai_correct": 0,
+                    "strong_total": 0, "strong_correct": 0,
+                    "rule_total": 0, "rule_correct": 0,
+                }
+            d = per_symbol[sym]
+            is_correct = r["outcome"] == "correct"
+
+            conf = r["ai_confidence"]
+            if conf is not None and conf >= 0.65:
+                d["ai_total"] += 1
+                if is_correct:
+                    d["ai_correct"] += 1
+
+            strength = r["strength"]
+            if strength == "STRONG":
+                d["strong_total"] += 1
+                if is_correct:
+                    d["strong_correct"] += 1
+            elif strength == "RULE":
+                d["rule_total"] += 1
+                if is_correct:
+                    d["rule_correct"] += 1
+
+            # Confidence bucket
+            if conf is not None:
+                for (lo, hi), lbl in zip(buckets_def, bucket_labels):
+                    if lo <= conf < hi:
+                        buckets_global[lbl]["total"] += 1
+                        if is_correct:
+                            buckets_global[lbl]["correct"] += 1
+                        break
+
+        # Calculate accuracy percentages
+        for sym, d in per_symbol.items():
+            d["ai_accuracy"] = (
+                round(d["ai_correct"] / d["ai_total"] * 100, 1)
+                if d["ai_total"] > 0 else None
+            )
+            d["strong_accuracy"] = (
+                round(d["strong_correct"] / d["strong_total"] * 100, 1)
+                if d["strong_total"] > 0 else None
+            )
+            d["rule_accuracy"] = (
+                round(d["rule_correct"] / d["rule_total"] * 100, 1)
+                if d["rule_total"] > 0 else None
+            )
+            d["training"] = training.get(sym)
+            d["train_runs"] = run_map.get(sym, 0)
+
+        for lbl, b in buckets_global.items():
+            b["accuracy"] = (
+                round(b["correct"] / b["total"] * 100, 1) if b["total"] > 0 else None
+            )
+
+        return {
+            "per_symbol": per_symbol,
+            "confidence_buckets": [
+                {"label": lbl, **buckets_global[lbl]} for lbl in bucket_labels
+            ],
+        }
 
 
 def get_recent_signals(limit: int = 50) -> list[dict]:

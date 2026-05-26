@@ -87,6 +87,8 @@ class StockModel:
         self.feature_cols: list[str] = []
         self.trained = False
         self.trained_at = 0.0
+        self.train_samples = 0
+        self.outcome_samples = 0
         self._path = os.path.join(CACHE_DIR, f"{symbol}.pkl")
         self._load()
 
@@ -150,7 +152,17 @@ class StockModel:
 
             self.trained = True
             self.trained_at = time.time()
+            self.train_samples = len(X)
+            self.outcome_samples = len(outcome_data) if outcome_data else 0
             self._save()
+
+            # Persist to DB for dashboard reporting
+            try:
+                from database import log_training
+                log_training(self.symbol, len(X), self.outcome_samples)
+            except Exception:
+                pass
+
             logger.info(f"[ML] {self.symbol} trained on {len(X)} samples")
             return True
         except Exception as e:
