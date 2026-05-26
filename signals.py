@@ -8,10 +8,20 @@ ET = ZoneInfo("America/New_York")
 _MARKET_OPEN = time(9, 30)
 _MARKET_CLOSE = time(16, 0)
 
+# Crypto tickers trade 24/7 — no market hours restriction
+_CRYPTO_SYMBOLS = {"BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD",
+                   "ADA-USD", "DOGE-USD", "AVAX-USD", "MATIC-USD", "DOT-USD"}
+
+
+def is_crypto(symbol: str) -> bool:
+    return symbol.upper() in _CRYPTO_SYMBOLS or symbol.upper().endswith("-USD")
+
 
 # ── Market hours ──────────────────────────────────────────────────────────────
 
-def is_market_open() -> bool:
+def is_market_open(symbol: str = "") -> bool:
+    if is_crypto(symbol):
+        return True
     from datetime import datetime
     now = datetime.now(ET)
     if now.weekday() >= 5:
@@ -19,8 +29,9 @@ def is_market_open() -> bool:
     return _MARKET_OPEN <= now.time() <= _MARKET_CLOSE
 
 
-def market_session() -> str:
-    """Returns 'open', 'pre', 'after', or 'closed' (weekend)."""
+def market_session(symbol: str = "") -> str:
+    if is_crypto(symbol):
+        return "open"
     from datetime import datetime
     now = datetime.now(ET)
     if now.weekday() >= 5:
@@ -67,6 +78,12 @@ def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return tr.rolling(period).mean()
 
 
+def _ema200(series: pd.Series) -> float | None:
+    if len(series) < 200:
+        return None
+    return float(series.ewm(span=200, adjust=False).mean().iloc[-1])
+
+
 def _trend(df_1h: pd.DataFrame) -> str:
     """Trend based on EMA200 on hourly data."""
     close = df_1h["Close"].squeeze()
@@ -107,16 +124,70 @@ def _stars(score: int) -> str:
     return "⭐" * score + "☆" * (5 - score)
 
 
+# ── 1h bias for multi-timeframe confirmation ──────────────────────────────────
+
+def get_1h_bias(symbol: str) -> tuple[str | None, pd.DataFrame | None]:
+    """
+    Returns (bias, df_1h) where bias is 'BUY', 'SELL', or None.
+    Uses same RSI/MACD/EMA logic on 1h candles.
+    Returns the df so the caller can pass it to _trend().
+    """
+    try:
+        period = "60d" if is_crypto(symbol) else "60d"
+        df = yf.download(symbol, period=period, interval="1h",
+                         progress=False, auto_adjust=True)
+        if df.empty or len(df) < 50:
+            return None, None
+
+        close = df["Close"].squeeze()
+        rsi = _rsi(close)
+        macd_line, signal_line = _macd(close)
+        ema9 = close.ewm(span=9, adjust=False).mean()
+        ema21 = close.ewm(span=21, adjust=False).mean()
+
+        rsi_now = float(rsi.iloc[-1])
+        macd_bull = (float(macd_line.iloc[-2]) < float(signal_line.iloc[-2])
+                     and float(macd_line.iloc[-1]) > float(signal_line.iloc[-1]))
+        macd_bear = (float(macd_line.iloc[-2]) > float(signal_line.iloc[-2])
+                     and float(macd_line.iloc[-1]) < float(signal_line.iloc[-1]))
+        ema_bull = (float(ema9.iloc[-2]) < float(ema21.iloc[-2])
+                    and float(ema9.iloc[-1]) > float(ema21.iloc[-1]))
+        ema_bear = (float(ema9.iloc[-2]) > float(ema21.iloc[-2])
+                    and float(ema9.iloc[-1]) < float(ema21.iloc[-1]))
+
+        buy_hits = [rsi_now < 45, macd_bull, ema_bull]
+        sell_hits = [rsi_now > 55, macd_bear, ema_bear]
+
+        if sum(buy_hits) >= 2:
+            return "BUY", df
+        if sum(sell_hits) >= 2:
+            return "SELL", df
+        return None, df
+    except Exception as exc:
+        print(f"[signals] 1h bias error for {symbol}: {exc}")
+        return None, None
+
+
 # ── Main signal function ──────────────────────────────────────────────────────
 
 def get_signal(symbol: str, df_1h: pd.DataFrame | None = None) -> tuple[dict | None, pd.DataFrame | None]:
     """
     Returns (signal, df_5m) or (None, df_5m).
-    signal includes: action, price, tp, sl, rr, rsi, trend, quality, reasons, strength.
+    For crypto, uses 1h candles instead of 5m (more reliable data).
     """
     try:
-        df = yf.download(symbol, period="5d", interval="5m", progress=False, auto_adjust=True)
-        if df.empty or len(df) < 50:
+        if is_crypto(symbol):
+            interval = "1h"
+            period = "30d"
+            min_bars = 50
+        else:
+            interval = "5m"
+            period = "5d"
+            min_bars = 50
+
+        df = yf.download(symbol, period=period, interval=interval,
+                         progress=False, auto_adjust=True)
+        if df.empty or len(df) < min_bars:
             return None, None
 
         close = df["Close"].squeeze()
@@ -141,13 +212,11 @@ def get_signal(symbol: str, df_1h: pd.DataFrame | None = None) -> tuple[dict | N
         ema_bear = (float(ema9.iloc[-2]) > float(ema21.iloc[-2])
                     and float(ema9.iloc[-1]) < float(ema21.iloc[-1]))
 
-        # Looser thresholds for realistic signal frequency
         buy_hits = [rsi_now < 40, macd_bull, ema_bull]
         sell_hits = [rsi_now > 60, macd_bear, ema_bear]
 
         trend = _trend(df_1h) if df_1h is not None and not df_1h.empty else "unknown"
 
-        # TP/SL using ATR (1.5× SL, 2.5× TP → R/R ≈ 1:1.7)
         sl_dist = atr_val * 1.5
         tp_dist = atr_val * 2.5
         rr = round(tp_dist / sl_dist, 1) if sl_dist > 0 else 0
@@ -201,7 +270,8 @@ def get_signal(symbol: str, df_1h: pd.DataFrame | None = None) -> tuple[dict | N
 def combine_signals(rule_sig: dict | None, ml_result: dict,
                     symbol: str, price: float, rsi: float,
                     df_5m: pd.DataFrame | None = None,
-                    df_1h: pd.DataFrame | None = None) -> dict | None:
+                    df_1h: pd.DataFrame | None = None,
+                    bias_1h: str | None = None) -> dict | None:
     ai_signal = ml_result.get("ai_signal")
     buy_prob = ml_result.get("buy_prob")
     sell_prob = ml_result.get("sell_prob")
@@ -220,7 +290,6 @@ def combine_signals(rule_sig: dict | None, ml_result: dict,
     elif ai_signal:
         prob = buy_prob if ai_signal == "BUY" else sell_prob
         if prob is not None and prob >= 0.70:
-            # AI-only signal: compute TP/SL from df_5m if available
             atr_val = 0.0
             trend = "unknown"
             if df_5m is not None and not df_5m.empty:
@@ -247,6 +316,20 @@ def combine_signals(rule_sig: dict | None, ml_result: dict,
 
     if sig is None:
         return None
+
+    # Multi-timeframe filter: if 1h bias exists and disagrees, suppress
+    if bias_1h is not None and bias_1h != sig["action"]:
+        print(f"[signals] MTF suppressed {sig['action']} on {symbol} "
+              f"(1h bias={bias_1h})")
+        return None
+
+    # Tag as MTF-confirmed when 1h bias agrees
+    if bias_1h == sig["action"]:
+        sig["mtf_confirmed"] = True
+        if "MTF confirmed" not in " ".join(sig.get("reasons", [])):
+            sig.setdefault("reasons", []).append("Multi-timeframe confirmed (1h+5m)")
+    else:
+        sig["mtf_confirmed"] = False
 
     # Compute final quality score
     rule_hits = sum([

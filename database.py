@@ -58,13 +58,27 @@ def init_db() -> None:
                 user_id     TEXT NOT NULL,
                 symbol      TEXT NOT NULL,
                 entry_price REAL NOT NULL,
+                tp          REAL,
+                sl          REAL,
                 opened_at   TEXT NOT NULL,
                 closed_at   TEXT,
                 exit_price  REAL,
                 pnl_pct     REAL,
                 status      TEXT DEFAULT 'open'
             );
+
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                user_id TEXT NOT NULL,
+                symbol  TEXT NOT NULL,
+                PRIMARY KEY (user_id, symbol)
+            );
         """)
+        # Migrate existing positions table if tp/sl columns missing
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(positions)").fetchall()]
+        if "tp" not in cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN tp REAL")
+        if "sl" not in cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN sl REAL")
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────
@@ -157,17 +171,17 @@ def get_outcome_training_data() -> list[dict]:
 
 # ── Positions (per-user) ──────────────────────────────────────────────────────
 
-def open_position(user_id: str | int, symbol: str, entry_price: float) -> None:
+def open_position(user_id: str | int, symbol: str, entry_price: float,
+                  tp: float | None = None, sl: float | None = None) -> None:
     with _conn() as conn:
-        # Close any existing open position for this symbol first
         conn.execute("""
             UPDATE positions SET status = 'replaced', closed_at = ?
             WHERE user_id = ? AND symbol = ? AND status = 'open'
         """, (datetime.utcnow().isoformat(), str(user_id), symbol))
         conn.execute("""
-            INSERT INTO positions (user_id, symbol, entry_price, opened_at)
-            VALUES (?, ?, ?, ?)
-        """, (str(user_id), symbol, entry_price, datetime.utcnow().isoformat()))
+            INSERT INTO positions (user_id, symbol, entry_price, tp, sl, opened_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (str(user_id), symbol, entry_price, tp, sl, datetime.utcnow().isoformat()))
 
 
 def close_position(user_id: str | int, symbol: str, exit_price: float) -> dict | None:
@@ -197,8 +211,17 @@ def get_user_open_positions(user_id: str | int) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def get_all_open_positions() -> list[dict]:
+    """All open positions across all users — used by TP/SL monitor job."""
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT * FROM positions WHERE status = 'open'
+            ORDER BY opened_at DESC
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+
 def get_users_with_open_position(symbol: str) -> list[str]:
-    """Returns chat_ids of all users who have an open position in symbol."""
     with _conn() as conn:
         rows = conn.execute("""
             SELECT DISTINCT user_id FROM positions
@@ -215,6 +238,48 @@ def get_user_pnl(user_id: str | int) -> list[dict]:
             ORDER BY closed_at DESC LIMIT 20
         """, (str(user_id),)).fetchall()
         return [dict(r) for r in rows]
+
+
+# ── Subscriptions ─────────────────────────────────────────────────────────────
+
+def subscribe_user(user_id: str | int, symbols: list[str]) -> None:
+    with _conn() as conn:
+        for sym in symbols:
+            conn.execute("""
+                INSERT OR IGNORE INTO subscriptions (user_id, symbol) VALUES (?, ?)
+            """, (str(user_id), sym.upper()))
+
+
+def unsubscribe_user(user_id: str | int, symbol: str | None = None) -> None:
+    with _conn() as conn:
+        if symbol:
+            conn.execute("DELETE FROM subscriptions WHERE user_id = ? AND symbol = ?",
+                         (str(user_id), symbol.upper()))
+        else:
+            conn.execute("DELETE FROM subscriptions WHERE user_id = ?", (str(user_id),))
+
+
+def get_user_subscriptions(user_id: str | int) -> list[str]:
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT symbol FROM subscriptions WHERE user_id = ? ORDER BY symbol",
+            (str(user_id),)
+        ).fetchall()
+        return [r["symbol"] for r in rows]
+
+
+def get_subscribers_for_symbol(symbol: str) -> list[str]:
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT user_id FROM subscriptions WHERE symbol = ?", (symbol.upper(),)
+        ).fetchall()
+        return [r["user_id"] for r in rows]
+
+
+def get_all_subscriber_ids() -> list[str]:
+    with _conn() as conn:
+        rows = conn.execute("SELECT DISTINCT user_id FROM subscriptions").fetchall()
+        return [r["user_id"] for r in rows]
 
 
 # ── Dashboard stats ───────────────────────────────────────────────────────────
@@ -261,7 +326,6 @@ def get_stats() -> dict:
             "SELECT action, COUNT(*) AS cnt FROM signals GROUP BY action"
         ).fetchall()
 
-        # Top P&L performers
         top_pnl = conn.execute("""
             SELECT u.username, u.chat_id,
                    COUNT(p.id) AS trades,
@@ -284,6 +348,46 @@ def get_stats() -> dict:
             "buy_sell": {r["action"]: r["cnt"] for r in buy_sell},
             "top_pnl": [dict(r) for r in top_pnl],
         }
+
+
+def get_weekly_stats() -> dict:
+    """Signal stats for the past 7 days — used in weekly recap."""
+    cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT symbol, action,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN outcome='correct'   THEN 1 ELSE 0 END) AS correct,
+                   SUM(CASE WHEN outcome='incorrect' THEN 1 ELSE 0 END) AS incorrect,
+                   SUM(CASE WHEN outcome!='pending'  THEN 1 ELSE 0 END) AS resolved
+            FROM signals WHERE sent_at >= ?
+            GROUP BY symbol, action
+        """, (cutoff,)).fetchall()
+        total = conn.execute(
+            "SELECT COUNT(*) FROM signals WHERE sent_at >= ?", (cutoff,)
+        ).fetchone()[0]
+        resolved_total = conn.execute(
+            "SELECT COUNT(*) FROM signals WHERE outcome != 'pending' AND sent_at >= ?", (cutoff,)
+        ).fetchone()[0]
+        correct_total = conn.execute(
+            "SELECT COUNT(*) FROM signals WHERE outcome = 'correct' AND sent_at >= ?", (cutoff,)
+        ).fetchone()[0]
+    accuracy = round(correct_total / resolved_total * 100, 1) if resolved_total > 0 else 0
+    per_symbol = {}
+    for r in rows:
+        sym = r["symbol"]
+        if sym not in per_symbol:
+            per_symbol[sym] = {"total": 0, "correct": 0, "resolved": 0}
+        per_symbol[sym]["total"] += r["total"]
+        per_symbol[sym]["correct"] += r["correct"]
+        per_symbol[sym]["resolved"] += r["resolved"]
+    return {
+        "total": total,
+        "resolved": resolved_total,
+        "correct": correct_total,
+        "accuracy": accuracy,
+        "per_symbol": per_symbol,
+    }
 
 
 def get_recent_signals(limit: int = 50) -> list[dict]:
