@@ -1,0 +1,24 @@
+services:
+
+  bot:
+    build: .
+    command: python bot.py
+    env_file: .env
+    volumes:
+      - app_data:/app/data
+      - model_cache:/app/.model_cache
+    restart: unless-stopped
+
+  dashboard:
+    build: .
+    command: python dashboard.py
+    env_file: .env
+    ports:
+      - "5001:5000"
+    volumes:
+      - app_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  app_data:
+  model_cache:
