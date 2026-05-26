@@ -515,10 +515,10 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
     await _ensure_models_trained(context.bot)
 
     for symbol in _get_symbols():
-        # Skip non-crypto during closed market
+        # Skip non-crypto outside regular market hours (9:30am–4:00pm ET)
         if not is_crypto(symbol):
             session = market_session(symbol)
-            if session not in ("open", "pre"):
+            if session != "open":
                 logger.debug(f"{symbol}: market {session} — skip")
                 continue
 
