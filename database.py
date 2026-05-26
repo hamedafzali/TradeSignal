@@ -757,7 +757,7 @@ def add_symbol(symbol: str, added_by: str = "admin") -> bool:
 
 
 def remove_symbol(symbol: str) -> bool:
-    """Soft-delete (sets active=0). Returns True if found."""
+    """Soft-delete (sets active=0) and clears sentiment cache. Returns True if found."""
     sym = symbol.upper()
     with _conn() as conn:
         row = conn.execute(
@@ -766,6 +766,7 @@ def remove_symbol(symbol: str) -> bool:
         if not row or not row["active"]:
             return False
         conn.execute("UPDATE symbols SET active = 0 WHERE symbol = ?", (sym,))
+        conn.execute("DELETE FROM sentiment_cache WHERE symbol = ?", (sym,))
         return True
 
 
