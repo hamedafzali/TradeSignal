@@ -2,8 +2,15 @@ services:
 
   bot:
     build: .
+    container_name: tradesignal-bot
     command: python bot.py
-    env_file: .env
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - ADMIN_CHAT_ID=${ADMIN_CHAT_ID}
+      - CHANNEL_ID=${CHANNEL_ID}
+      - SYMBOLS=${SYMBOLS:-AAPL,TSLA,NVDA,MSFT}
+      - SCAN_INTERVAL_MINUTES=${SCAN_INTERVAL_MINUTES:-5}
+      - OUTCOME_CHECK_HOURS=${OUTCOME_CHECK_HOURS:-24}
     volumes:
       - app_data:/app/data
       - model_cache:/app/.model_cache
@@ -11,10 +18,13 @@ services:
 
   dashboard:
     build: .
+    container_name: tradesignal-dashboard
     command: python dashboard.py
-    env_file: .env
+    environment:
+      - DASHBOARD_HOST=0.0.0.0
+      - DASHBOARD_PORT=5000
     ports:
-      - "5001:5000"
+      - "5002:5000"
     volumes:
       - app_data:/app/data
     restart: unless-stopped
