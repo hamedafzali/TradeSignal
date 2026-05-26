@@ -647,6 +647,88 @@ def get_ml_accuracy_stats() -> dict:
         }
 
 
+def get_ml_activity_log(limit: int = 40) -> dict:
+    """
+    Returns:
+    - training_events: recent entries from ml_training_log
+    - recent_outcomes: last N resolved signals (for outcome feed)
+    - symbol_health: per-symbol accuracy trend and model age
+    """
+    with _conn() as conn:
+        train_rows = conn.execute("""
+            SELECT symbol, trained_at, train_samples, outcome_samples
+            FROM ml_training_log ORDER BY id DESC LIMIT ?
+        """, (limit,)).fetchall()
+
+        outcome_rows = conn.execute("""
+            SELECT symbol, action, strength, price, outcome, outcome_at,
+                   ai_confidence, reasons, sent_at
+            FROM signals
+            WHERE outcome IN ('correct', 'incorrect', 'neutral')
+            ORDER BY outcome_at DESC LIMIT 60
+        """).fetchall()
+
+        # Per-symbol: last 10 resolved outcomes for accuracy trend
+        sym_rows = conn.execute("""
+            SELECT symbol, outcome FROM signals
+            WHERE outcome IN ('correct', 'incorrect')
+            ORDER BY outcome_at DESC
+        """).fetchall()
+
+        # Pending count per symbol
+        pending_rows = conn.execute("""
+            SELECT symbol, COUNT(*) AS cnt FROM signals
+            WHERE outcome = 'pending'
+            GROUP BY symbol
+        """).fetchall()
+
+        # Last training per symbol
+        last_train = conn.execute("""
+            SELECT symbol, MAX(trained_at) AS last_trained,
+                   MAX(outcome_samples) AS last_outcome_samples
+            FROM ml_training_log GROUP BY symbol
+        """).fetchall()
+
+    # Build per-symbol health
+    sym_outcomes: dict[str, list[str]] = {}
+    for r in sym_rows:
+        sym_outcomes.setdefault(r["symbol"], []).append(r["outcome"])
+
+    pending_map = {r["symbol"]: r["cnt"] for r in pending_rows}
+    last_train_map = {r["symbol"]: dict(r) for r in last_train}
+
+    symbol_health = {}
+    for sym, outcomes in sym_outcomes.items():
+        last10 = outcomes[:10]
+        correct = last10.count("correct")
+        recent_acc = round(correct / len(last10) * 100, 1)
+        all_correct = outcomes.count("correct")
+        all_acc = round(all_correct / len(outcomes) * 100, 1)
+        trend = "improving" if len(last10) >= 5 and recent_acc > all_acc else (
+            "declining" if len(last10) >= 5 and recent_acc < all_acc - 5 else "stable"
+        )
+        lt = last_train_map.get(sym, {})
+        symbol_health[sym] = {
+            "recent_acc": recent_acc,
+            "all_acc": all_acc,
+            "recent_count": len(last10),
+            "total_outcomes": len(outcomes),
+            "trend": trend,
+            "pending": pending_map.get(sym, 0),
+            "last_trained": lt.get("last_trained"),
+            "last_outcome_samples": lt.get("last_outcome_samples", 0),
+        }
+
+    return {
+        "training_events": [dict(r) for r in train_rows],
+        "recent_outcomes": [
+            {**dict(r), "reasons": json.loads(r["reasons"] or "[]")}
+            for r in outcome_rows
+        ],
+        "symbol_health": symbol_health,
+    }
+
+
 def get_recent_signals(limit: int = 50) -> list[dict]:
     with _conn() as conn:
         rows = conn.execute("""

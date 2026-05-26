@@ -5,7 +5,7 @@ import json as _json
 from flask import Flask, jsonify, render_template_string, request
 from database import (
     init_db, get_stats, get_recent_signals,
-    get_ml_accuracy_stats,
+    get_ml_accuracy_stats, get_ml_activity_log,
     get_all_symbols_with_status, add_symbol, remove_symbol,
 )
 
@@ -57,6 +57,23 @@ _HTML = """<!DOCTYPE html>
   .btn-del:hover  { background:#5a1f1f; color:#f87171; }
   .training-chip { font-size:.72rem; color:#8b8fa8; background:#1a1d27;
                    border:1px solid #2a2d3a; border-radius:4px; padding:1px 6px; }
+  .health-card { background:#0f1117; border-radius:8px; padding:14px 16px; border:1px solid #2a2d3a; }
+  .trend-up   { color:#4ade80 }
+  .trend-down { color:#f87171 }
+  .trend-flat { color:#fbbf24 }
+  .event-row { border-left:3px solid #2a2d3a; padding:8px 12px; margin-bottom:8px;
+               background:#0f1117; border-radius:0 6px 6px 0; font-size:.82rem; }
+  .event-row.has-outcomes { border-left-color:#a78bfa; }
+  .outcome-row { padding:7px 10px; margin-bottom:6px; background:#0f1117;
+                 border-radius:6px; font-size:.82rem; }
+  .outcome-correct   { border-left:3px solid #4ade80; }
+  .outcome-incorrect { border-left:3px solid #f87171; }
+  .outcome-neutral   { border-left:3px solid #fbbf24; }
+  .suggestion-item { padding:10px 14px; border-radius:6px; margin-bottom:8px;
+                     border:1px solid #2a2d3a; font-size:.85rem; }
+  .sug-warn  { border-color:#f8717140; background:#4a1a1a22; }
+  .sug-ok    { border-color:#4ade8040; background:#1a4a2e22; }
+  .sug-info  { border-color:#38bdf840; background:#1a2d3a22; }
 </style>
 </head>
 <body>
@@ -70,6 +87,7 @@ _HTML = """<!DOCTYPE html>
   <ul class="nav nav-tabs mb-4" id="mainTabs">
     <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-overview">Overview</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-ml">🧠 ML Accuracy</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-activity">🔄 Learning Activity</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-admin">⚙️ Admin</button></li>
   </ul>
 
@@ -164,14 +182,63 @@ _HTML = """<!DOCTYPE html>
         <div class="card p-3">
           <h6 class="mb-1">How Training Works</h6>
           <p class="small mt-2" style="color:#8b8fa8; line-height:1.7">
-            <strong style="color:#4ade80">Every 24 hours</strong>, the model retrains on 60 days of hourly data.<br>
-            <strong style="color:#fbbf24">Confirmed outcomes</strong> (signals marked correct/incorrect after 24h) are
-            injected back at <strong style="color:#a78bfa">3× weight</strong> so the model learns from its real mistakes.<br>
+            <strong style="color:#4ade80">Every 20 minutes</strong>, the bot checks each symbol for new resolved outcomes.<br>
+            As soon as <strong style="color:#fbbf24">3 new outcomes</strong> arrive since the last training run,
+            the model retrains immediately — no waiting.<br>
+            As a fallback, it always retrains every <strong style="color:#38bdf8">6 hours</strong> even without new outcomes.<br>
+            <strong style="color:#fbbf24">Confirmed outcomes</strong> are injected back at
+            <strong style="color:#a78bfa">3× weight</strong> so the model learns from its real mistakes.<br>
             <strong style="color:#38bdf8">Gradient Boosting</strong> runs two classifiers — one for BUY, one for SELL —
             each outputting a probability from 0 to 1.<br>
             A signal fires when confidence exceeds <strong style="color:#fbbf24">65%</strong>.
             STRONG signals require both the rule engine and AI to agree.
           </p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── LEARNING ACTIVITY TAB ───────────────────────────────────────── -->
+  <div class="tab-pane fade" id="tab-activity">
+
+    <!-- Model health cards per symbol -->
+    <div class="row g-3 mb-4">
+      <div class="col-12">
+        <div class="card p-3">
+          <div class="d-flex justify-content-between align-items-center mb-3">
+            <h6 class="mb-0">🩺 Model Health per Symbol</h6>
+            <button class="btn btn-sm" style="background:#1a2d3a;color:#38bdf8;border:1px solid #2a2d3a"
+              onclick="refreshActivity()">↻ Refresh</button>
+          </div>
+          <div id="health-cards" class="row g-3"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row g-3 mb-4">
+      <!-- Training event log -->
+      <div class="col-md-6">
+        <div class="card p-3 h-100">
+          <h6 class="mb-3">📋 Training Event Log</h6>
+          <div id="train-log" style="max-height:420px;overflow-y:auto"></div>
+        </div>
+      </div>
+
+      <!-- Recent outcome feed -->
+      <div class="col-md-6">
+        <div class="card p-3 h-100">
+          <h6 class="mb-3">📬 Recent Resolved Outcomes</h6>
+          <div id="outcome-feed" style="max-height:420px;overflow-y:auto"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Improvement suggestions -->
+    <div class="row g-3 mb-4">
+      <div class="col-12">
+        <div class="card p-3">
+          <h6 class="mb-3">💡 What Needs Attention</h6>
+          <div id="suggestions"></div>
         </div>
       </div>
     </div>
@@ -499,12 +566,131 @@ async function restoreSymbol(sym) {
   if (res.ok) refreshAdmin();
 }
 
+// ── Learning Activity ─────────────────────────────────────────────────────────
+function trendIcon(t) {
+  if (t === 'improving') return '<span class="trend-up">↑ Improving</span>';
+  if (t === 'declining') return '<span class="trend-down">↓ Declining</span>';
+  return '<span class="trend-flat">→ Stable</span>';
+}
+function modelAge(ts) {
+  if (!ts) return 'never trained';
+  const mins = Math.round((Date.now() - new Date(ts+'Z')) / 60000);
+  if (mins < 60) return `${mins}m ago`;
+  if (mins < 1440) return `${Math.round(mins/60)}h ago`;
+  return `${Math.round(mins/1440)}d ago`;
+}
+
+async function refreshActivity() {
+  const data = await fetch('/api/ml-activity').then(r=>r.json());
+
+  // ── Model health cards ──
+  const health = data.symbol_health || {};
+  document.getElementById('health-cards').innerHTML =
+    Object.entries(health).map(([sym, h]) => {
+      const accColor = h.recent_acc >= 60 ? '#4ade80' : (h.recent_acc >= 50 ? '#fbbf24' : '#f87171');
+      const barW = Math.min(h.recent_acc, 100);
+      const barCls = h.recent_acc >= 60 ? 'accuracy-bar-high' : (h.recent_acc >= 50 ? 'accuracy-bar-mid' : 'accuracy-bar-low');
+      return `<div class="col-6 col-md-4 col-lg-3">
+        <div class="health-card">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <span class="sym-tag">${sym}</span>
+            ${trendIcon(h.trend)}
+          </div>
+          <div class="progress mb-1" style="height:5px">
+            <div class="progress-bar ${barCls}" style="width:${barW}%"></div>
+          </div>
+          <div class="d-flex justify-content-between" style="font-size:.75rem;color:#8b8fa8">
+            <span>Recent acc: <strong style="color:${accColor}">${h.recent_acc}%</strong> (${h.recent_count})</span>
+            <span>All: ${h.all_acc}%</span>
+          </div>
+          <div class="mt-2" style="font-size:.72rem;color:#555">
+            <span>📊 ${h.total_outcomes} outcomes · ⏳ ${h.pending} pending</span><br>
+            <span>🕒 Trained ${modelAge(h.last_trained)}</span>
+          </div>
+        </div>
+      </div>`;
+    }).join('') || '<div class="col-12" style="color:#555">No training data yet — models train automatically once signals accumulate outcomes.</div>';
+
+  // ── Training event log ──
+  const events = data.training_events || [];
+  document.getElementById('train-log').innerHTML = events.length
+    ? events.map(e => {
+        const cls = e.outcome_samples > 0 ? 'has-outcomes' : '';
+        const trigger = e.outcome_samples >= 3
+          ? `<span style="color:#a78bfa">⚡ ${e.outcome_samples} outcomes triggered</span>`
+          : `<span style="color:#38bdf8">⏱ time-based</span>`;
+        return `<div class="event-row ${cls}">
+          <div class="d-flex justify-content-between">
+            <strong style="color:#e0e0e0">${e.symbol}</strong>
+            <span style="color:#555">${new Date(e.trained_at+'Z').toLocaleString()}</span>
+          </div>
+          <div class="mt-1">${trigger} &nbsp;·&nbsp;
+            <span style="color:#8b8fa8">${e.train_samples} samples trained</span>
+            ${e.outcome_samples > 0 ? `&nbsp;·&nbsp;<span style="color:#fbbf24">${e.outcome_samples} real outcomes blended (3× weight)</span>` : ''}
+          </div>
+        </div>`;
+      }).join('')
+    : '<div style="color:#555;font-size:.85rem">No training runs yet. The model will train automatically on startup and then every time 3 new outcomes resolve.</div>';
+
+  // ── Outcome feed ──
+  const outcomes = data.recent_outcomes || [];
+  document.getElementById('outcome-feed').innerHTML = outcomes.length
+    ? outcomes.map(o => {
+        const cls = `outcome-${o.outcome}`;
+        const emoji = o.outcome === 'correct' ? '✅' : o.outcome === 'incorrect' ? '❌' : '➖';
+        const conf = o.ai_confidence ? ` · AI ${(o.ai_confidence*100).toFixed(0)}%` : '';
+        const when = o.outcome_at ? new Date(o.outcome_at+'Z').toLocaleString() : '—';
+        return `<div class="outcome-row ${cls}">
+          <div class="d-flex justify-content-between">
+            <span><strong>${o.symbol}</strong> ${badge(o.action,'badge-'+o.action)} ${badge(o.strength||'RULE','badge-'+(o.strength||'RULE'))}</span>
+            <span style="color:#555;font-size:.72rem">${when}</span>
+          </div>
+          <div style="color:#8b8fa8;margin-top:3px">
+            ${emoji} <strong style="color:#e0e0e0">${o.outcome.toUpperCase()}</strong>
+            · Entry $${o.price ? o.price.toFixed(2) : '—'}${conf}
+          </div>
+        </div>`;
+      }).join('')
+    : '<div style="color:#555;font-size:.85rem">No resolved outcomes yet. Outcomes are checked every 30 minutes — signals need at least 1 hour to resolve.</div>';
+
+  // ── Suggestions ──
+  const sugs = [];
+  for (const [sym, h] of Object.entries(health)) {
+    if (h.total_outcomes === 0) {
+      sugs.push({cls:'sug-info', icon:'ℹ️',
+        text:`<strong>${sym}</strong>: no outcomes resolved yet — model is running on market data only, no real feedback loop active`});
+    } else if (h.recent_acc < 45 && h.recent_count >= 5) {
+      sugs.push({cls:'sug-warn', icon:'⚠️',
+        text:`<strong>${sym}</strong>: recent accuracy ${h.recent_acc}% is below 45% on last ${h.recent_count} outcomes — model may be overfitting or market conditions changed`});
+    } else if (h.trend === 'declining') {
+      sugs.push({cls:'sug-warn', icon:'📉',
+        text:`<strong>${sym}</strong>: accuracy declining (recent ${h.recent_acc}% vs all-time ${h.all_acc}%) — more outcomes are needed to retrain`});
+    } else if (h.trend === 'improving') {
+      sugs.push({cls:'sug-ok', icon:'📈',
+        text:`<strong>${sym}</strong>: accuracy improving! Recent ${h.recent_acc}% vs all-time ${h.all_acc}% — continuous learning is working`});
+    } else if (h.pending > 10) {
+      sugs.push({cls:'sug-info', icon:'⏳',
+        text:`<strong>${sym}</strong>: ${h.pending} signals still pending outcome — check outcome interval or if TP/SL were set on signals`});
+    }
+  }
+  if (!Object.keys(health).length) {
+    sugs.push({cls:'sug-info', icon:'🚀',
+      text:'No models trained yet. Send a few signals first — outcomes resolve after 1h and training starts automatically.'});
+  }
+  document.getElementById('suggestions').innerHTML = sugs.length
+    ? sugs.map(s => `<div class="suggestion-item ${s.cls}">${s.icon} ${s.text}</div>`).join('')
+    : '<div class="suggestion-item sug-ok">✅ All models look healthy — no issues detected.</div>';
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 refreshOverview();
 setInterval(refreshOverview, 30000);
 
 document.querySelectorAll('[data-bs-target="#tab-ml"]').forEach(el =>
   el.addEventListener('shown.bs.tab', () => refreshML())
+);
+document.querySelectorAll('[data-bs-target="#tab-activity"]').forEach(el =>
+  el.addEventListener('shown.bs.tab', () => refreshActivity())
 );
 document.querySelectorAll('[data-bs-target="#tab-admin"]').forEach(el =>
   el.addEventListener('shown.bs.tab', () => refreshAdmin())
@@ -533,6 +719,11 @@ def api_signals():
 @app.route("/api/ml-stats")
 def api_ml_stats():
     return jsonify(get_ml_accuracy_stats())
+
+
+@app.route("/api/ml-activity")
+def api_ml_activity():
+    return jsonify(get_ml_activity_log())
 
 
 @app.route("/api/search")
