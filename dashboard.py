@@ -308,7 +308,7 @@ _HTML = """<!DOCTYPE html>
     </div>
 
     <!-- Live bootstrap job progress -->
-    <div class="row g-3 mb-4" id="job-progress-row" style="display:none!important">
+    <div class="row g-3 mb-4" id="job-progress-row" style="display:none">
       <div class="col-12">
         <div class="card p-3" style="border-color:#a78bfa40;background:#1a1a2e">
           <div class="d-flex justify-content-between align-items-center mb-2">
