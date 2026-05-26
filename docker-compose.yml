@@ -12,6 +12,7 @@ services:
       - SCAN_INTERVAL_MINUTES=${SCAN_INTERVAL_MINUTES:-5}
       - OUTCOME_CHECK_HOURS=${OUTCOME_CHECK_HOURS:-24}
     volumes:
+      - .:/app                      # live code mount — git pull takes effect on restart
       - app_data:/app/data
       - model_cache:/app/.model_cache
     restart: unless-stopped
@@ -26,6 +27,7 @@ services:
     ports:
       - "5002:5000"
     volumes:
+      - .:/app
       - app_data:/app/data
     restart: unless-stopped
 
