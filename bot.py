@@ -22,6 +22,7 @@ from telegram.ext import (
 )
 
 from backtest import format_backtest_message, run_backtest
+from lang import t, signal_msg, tp_sl_alert, sell_alert as _sell_alert_msg
 from database import (
     close_position,
     get_active_symbols,
@@ -34,6 +35,7 @@ from database import (
     get_subscribers_for_symbol,
     get_user_open_positions,
     get_user_pnl,
+    get_user_pref,
     get_user_subscriptions,
     get_users_with_open_position,
     get_weekly_stats,
@@ -42,6 +44,7 @@ from database import (
     log_user,
     open_position,
     seed_symbols,
+    set_user_pref,
     subscribe_user,
     unsubscribe_user,
     update_outcome,
@@ -218,24 +221,13 @@ async def monitor_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
             continue
 
         pnl = result["pnl_pct"]
-        sign = "+" if pnl >= 0 else ""
-        if hit_tp:
-            emoji, reason = "🎯", "Target reached"
-        else:
-            emoji, reason = "🛑", "Stop Loss triggered"
-
+        pref = get_user_pref(pos["user_id"])
+        msg = tp_sl_alert(sym, result["entry"], current, pnl,
+                          hit_tp=hit_tp, lang=pref["lang"])
         try:
             await context.bot.send_message(
                 chat_id=pos["user_id"],
-                text=(
-                    f"{emoji} *{sym} — {reason}*\n"
-                    f"━━━━━━━━━━━━━━━━━━━\n"
-                    f"Entry:  `${result['entry']:.2f}`\n"
-                    f"Exit:   `${current:.2f}`\n"
-                    f"P&L:    `{sign}{pnl:.2f}%`\n"
-                    f"━━━━━━━━━━━━━━━━━━━\n"
-                    f"_Position closed automatically._"
-                ),
+                text=msg,
                 parse_mode="Markdown",
             )
         except Exception as e:
@@ -261,8 +253,9 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
 
             rule_sig, df_5m = get_signal(symbol, df_1h=df_1h)
 
+            model = models.get(symbol)
             ml_result = (
-                models[symbol].predict(df_1h) if df_1h is not None and not df_1h.empty
+                model.predict(df_1h) if model and df_1h is not None and not df_1h.empty
                 else {"buy_prob": None, "sell_prob": None, "ai_signal": None}
             )
 
@@ -435,27 +428,15 @@ async def _send_private_sell(bot, user_id: str, sig: dict) -> None:
         return
 
     symbol = sig["symbol"]
-    current = sig["price"]
-    entry = pos["entry_price"]
-    pct = (current - entry) / entry * 100
-    sign = "+" if pct >= 0 else ""
-    pnl_emoji = "🟢" if pct >= 0 else "🔴"
-    tp = sig.get("tp", 0)
-    sl = sig.get("sl", 0)
-
-    body = (
-        f"🔔 *SELL Signal — {symbol}* (your position)\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"Your entry:    `${entry:.2f}`\n"
-        f"Current price: `${current:.2f}`\n"
-        f"{pnl_emoji} Unrealized P&L: `{sign}{pct:.2f}%`\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"Signal target: `${tp:.2f}`\n"
-        f"Signal stop:   `${sl:.2f}`\n\n"
-        f"_Consider closing your position now._"
+    pref = get_user_pref(user_id)
+    lang = pref["lang"]
+    body = _sell_alert_msg(
+        symbol, pos["entry_price"], sig["price"],
+        sig.get("tp", 0), sig.get("sl", 0), lang=lang,
     )
+    btn_label = t("btn_close_position", lang=lang)
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Close my position", callback_data=f"close:{symbol}")
+        InlineKeyboardButton(btn_label, callback_data=f"close:{symbol}")
     ]])
     try:
         await bot.send_message(chat_id=user_id, text=body, parse_mode="Markdown", reply_markup=keyboard)
@@ -464,26 +445,10 @@ async def _send_private_sell(bot, user_id: str, sig: dict) -> None:
 
 
 async def _send_subscriber_alert(bot, user_id: str, sig: dict) -> None:
-    action = sig["action"]
-    symbol = sig["symbol"]
-    price = sig["price"]
-    tp = sig.get("tp", 0)
-    sl = sig.get("sl", 0)
-    tp_pct = sig.get("tp_pct", 0)
-    stars = sig.get("stars", "")
-    emoji = "🟢" if action == "BUY" else "🔴"
-
+    pref = get_user_pref(user_id)
+    msg = signal_msg(sig, lang=pref["lang"], mode=pref["mode"])
     try:
-        await bot.send_message(
-            chat_id=user_id,
-            text=(
-                f"{emoji} *New {action} signal — {symbol}*\n"
-                f"Entry: `${price:.2f}` | TP: `${tp:.2f}` (+{tp_pct:.1f}%) | SL: `${sl:.2f}`\n"
-                f"Quality: {stars}\n\n"
-                f"_See the channel for full details._"
-            ),
-            parse_mode="Markdown",
-        )
+        await bot.send_message(chat_id=user_id, text=msg, parse_mode="Markdown")
     except Exception as e:
         logger.warning(f"Subscriber alert failed for {user_id}: {e}")
 
@@ -522,7 +487,7 @@ def _reply_keyboard() -> ReplyKeyboardMarkup:
         ["📊 Positions", "📈 P&L History"],
         ["🔍 Scan Market", "📉 Stats"],
         ["📬 Subscriptions", "🧪 Backtest"],
-        ["📋 Menu"],
+        ["⚙️ Settings", "📋 Menu"],
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, input_field_placeholder="Choose an action…")
 
@@ -758,6 +723,7 @@ _TEXT_ACTIONS: dict[str, str] = {
     "📉 stats": "stats",
     "📬 subscriptions": "subscribe",
     "🧪 backtest": "backtest_prompt",
+    "⚙️ settings": "settings",
     "📋 menu": "open_menu",
 }
 
@@ -788,6 +754,8 @@ async def text_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             await cmd_stats(fake_update, context)
         elif action == "subscribe":
             await cmd_subscribe(fake_update, context)
+        elif action == "settings":
+            await cmd_settings(update, context)
         elif action == "backtest_prompt":
             buttons = [
                 InlineKeyboardButton(sym, callback_data=f"bt:{sym}")
@@ -801,11 +769,62 @@ async def text_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
 
 
+# ── Settings ──────────────────────────────────────────────────────────────────
+
+def _settings_keyboard(lang: str, mode: str) -> InlineKeyboardMarkup:
+    check = lambda val, cur: "✓ " if val == cur else ""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f"{check('en', lang)}🇬🇧 English",  callback_data="set:lang:en"),
+            InlineKeyboardButton(f"{check('fa', lang)}🇮🇷 فارسی",   callback_data="set:lang:fa"),
+        ],
+        [
+            InlineKeyboardButton(f"{check('beginner', mode)}📗 Beginner / مبتدی", callback_data="set:mode:beginner"),
+            InlineKeyboardButton(f"{check('expert', mode)}📘 Expert / حرفه‌ای",   callback_data="set:mode:expert"),
+        ],
+    ])
+
+
+async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    log_user(uid, update.effective_user.username or "")
+    pref = get_user_pref(uid)
+    await update.message.reply_text(
+        t("settings_title", lang=pref["lang"]),
+        parse_mode="Markdown",
+        reply_markup=_settings_keyboard(pref["lang"], pref["mode"]),
+    )
+
+
+async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    uid = str(query.from_user.id)
+    _, field, value = query.data.split(":")
+    set_user_pref(uid, lang=value if field == "lang" else None,
+                  mode=value if field == "mode" else None)
+    pref = get_user_pref(uid)
+
+    if field == "lang":
+        key = "settings_saved_lang_en" if value == "en" else "settings_saved_lang_fa"
+    else:
+        key = "settings_saved_beginner" if value == "beginner" else "settings_saved_expert"
+
+    await query.edit_message_text(
+        t(key, lang=pref["lang"]) + "\n\n" + t("settings_title", lang=pref["lang"]),
+        parse_mode="Markdown",
+        reply_markup=_settings_keyboard(pref["lang"], pref["mode"]),
+    )
+
+
 # ── Commands ──────────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     log_user(user.id, user.username or "")
+
+    pref = get_user_pref(user.id)
+    lang = pref["lang"]
 
     if context.args and context.args[0].startswith("track_"):
         parts = context.args[0].split("_")
@@ -815,12 +834,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 price = float(price_str)
                 open_position(str(user.id), symbol, price)
                 await update.message.reply_text(
-                    f"✅ *{symbol}* position tracked at `${price:.2f}`\n\n"
-                    f"I'll alert you automatically when:\n"
-                    f"  • 🎯 Target price is reached\n"
-                    f"  • 🛑 Stop loss is triggered\n"
-                    f"  • 🔔 A SELL signal fires\n\n"
-                    f"Use /status to see open positions, /pnl for history.",
+                    t("position_tracked", lang=lang, symbol=symbol, price=price),
                     parse_mode="Markdown",
                 )
                 return
@@ -829,10 +843,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     channel_text = f"\n📢 Channel: {CHANNEL_ID}" if CHANNEL_ID else ""
     await update.message.reply_text(
-        f"📈 *Trading Signals Bot*{channel_text}\n\n"
-        "Signals are posted to the channel with Entry, Target, Stop Loss, and R/R ratio.\n\n"
-        "Tap *Track this trade* on any BUY signal to get automatic TP/SL alerts.\n\n"
-        "Use the buttons below or /menu to navigate.",
+        t("welcome", lang=lang) + channel_text,
         parse_mode="Markdown",
         reply_markup=_reply_keyboard(),
     )
@@ -890,24 +901,27 @@ async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    log_user(update.effective_user.id, update.effective_user.username or "")
+    uid = update.effective_user.id
+    log_user(uid, update.effective_user.username or "")
+    pref = get_user_pref(uid)
+    lang = pref["lang"]
     if not context.args:
-        await update.message.reply_text("Usage: /cancel SYMBOL  (e.g. /cancel AAPL)")
+        await update.message.reply_text(t("cancel_usage", lang=lang))
         return
     symbol = context.args[0].upper()
     df = yf.download(symbol, period="1d", interval="5m", progress=False, auto_adjust=True)
     exit_price = float(df["Close"].squeeze().iloc[-1]) if not df.empty else 0.0
-    result = close_position(str(update.effective_user.id), symbol, exit_price)
+    result = close_position(str(uid), symbol, exit_price)
     if result:
-        sign = "+" if result["pnl_pct"] >= 0 else ""
-        emoji = "🟢" if result["pnl_pct"] >= 0 else "🔴"
+        pnl = result["pnl_pct"]
+        sign = "+" if pnl >= 0 else ""
+        emoji = "🟢" if pnl >= 0 else "🔴"
         await update.message.reply_text(
-            f"{emoji} *{symbol}* closed manually\n"
-            f"P&L: `{sign}{result['pnl_pct']:.2f}%`",
+            t("cancel_closed", lang=lang, emoji=emoji, symbol=symbol, sign=sign, pnl=pnl),
             parse_mode="Markdown",
         )
     else:
-        await update.message.reply_text(f"No open position for {symbol}.")
+        await update.message.reply_text(t("cancel_not_found", lang=lang, symbol=symbol))
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1114,6 +1128,7 @@ async def post_init(app: Application) -> None:
     # Register commands so they appear in Telegram's "/" command list
     await app.bot.set_my_commands([
         BotCommand("menu", "Show main menu"),
+        BotCommand("settings", "Language & experience level / زبان و سطح"),
         BotCommand("status", "Open positions with live P&L"),
         BotCommand("pnl", "Closed trade history"),
         BotCommand("cancel", "Close a position manually"),
@@ -1154,7 +1169,7 @@ def main() -> None:
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     for cmd, fn in [
-        ("start", cmd_start), ("menu", cmd_menu),
+        ("start", cmd_start), ("menu", cmd_menu), ("settings", cmd_settings),
         ("status", cmd_status), ("pnl", cmd_pnl),
         ("cancel", cmd_cancel), ("stats", cmd_stats), ("scan", cmd_scan),
         ("train", cmd_train), ("test", cmd_test),
@@ -1167,6 +1182,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^menu:"))
     app.add_handler(CallbackQueryHandler(subscribe_callback, pattern=r"^sub:"))
     app.add_handler(CallbackQueryHandler(backtest_callback, pattern=r"^bt:"))
+    app.add_handler(CallbackQueryHandler(settings_callback, pattern=r"^set:"))
 
     # Reply keyboard text buttons
     app.add_handler(MessageHandler(

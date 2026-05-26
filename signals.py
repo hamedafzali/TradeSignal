@@ -212,8 +212,8 @@ def get_signal(symbol: str, df_1h: pd.DataFrame | None = None) -> tuple[dict | N
         ema_bear = (float(ema9.iloc[-2]) > float(ema21.iloc[-2])
                     and float(ema9.iloc[-1]) < float(ema21.iloc[-1]))
 
-        buy_hits = [rsi_now < 40, macd_bull, ema_bull]
-        sell_hits = [rsi_now > 60, macd_bear, ema_bear]
+        buy_hits = [rsi_now < 45, macd_bull, ema_bull]
+        sell_hits = [rsi_now > 55, macd_bear, ema_bear]
 
         trend = _trend(df_1h) if df_1h is not None and not df_1h.empty else "unknown"
 
@@ -222,7 +222,7 @@ def get_signal(symbol: str, df_1h: pd.DataFrame | None = None) -> tuple[dict | N
         rr = round(tp_dist / sl_dist, 1) if sl_dist > 0 else 0
 
         reasons_buy = []
-        if rsi_now < 40:
+        if rsi_now < 45:
             reasons_buy.append(f"RSI oversold ({rsi_now:.1f})")
         if macd_bull:
             reasons_buy.append("MACD bullish crossover")
@@ -232,7 +232,7 @@ def get_signal(symbol: str, df_1h: pd.DataFrame | None = None) -> tuple[dict | N
             reasons_buy.append("Volume spike (+50% above avg)")
 
         reasons_sell = []
-        if rsi_now > 60:
+        if rsi_now > 55:
             reasons_sell.append(f"RSI overbought ({rsi_now:.1f})")
         if macd_bear:
             reasons_sell.append("MACD bearish crossover")
@@ -333,7 +333,7 @@ def combine_signals(rule_sig: dict | None, ml_result: dict,
 
     # Compute final quality score
     rule_hits = sum([
-        sig["rsi"] < 40 if sig["action"] == "BUY" else sig["rsi"] > 60,
+        sig["rsi"] < 45 if sig["action"] == "BUY" else sig["rsi"] > 55,
         any("MACD" in r for r in sig["reasons"]),
         any("EMA" in r for r in sig["reasons"]),
     ])

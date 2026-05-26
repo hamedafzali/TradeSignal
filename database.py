@@ -80,6 +80,12 @@ def init_db() -> None:
                 added_by   TEXT DEFAULT 'admin'
             );
 
+            CREATE TABLE IF NOT EXISTS user_preferences (
+                chat_id TEXT PRIMARY KEY,
+                lang    TEXT DEFAULT 'en',
+                mode    TEXT DEFAULT 'beginner'
+            );
+
             CREATE TABLE IF NOT EXISTS ml_training_log (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol       TEXT NOT NULL,
@@ -403,6 +409,28 @@ def get_weekly_stats() -> dict:
         "accuracy": accuracy,
         "per_symbol": per_symbol,
     }
+
+
+# ── User preferences ─────────────────────────────────────────────────────────
+
+def get_user_pref(chat_id: str | int) -> dict:
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT lang, mode FROM user_preferences WHERE chat_id = ?",
+            (str(chat_id),)
+        ).fetchone()
+        return {"lang": row["lang"], "mode": row["mode"]} if row else {"lang": "en", "mode": "beginner"}
+
+
+def set_user_pref(chat_id: str | int, lang: str | None = None, mode: str | None = None) -> None:
+    current = get_user_pref(chat_id)
+    new_lang = lang or current["lang"]
+    new_mode = mode or current["mode"]
+    with _conn() as conn:
+        conn.execute("""
+            INSERT INTO user_preferences (chat_id, lang, mode) VALUES (?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET lang = ?, mode = ?
+        """, (str(chat_id), new_lang, new_mode, new_lang, new_mode))
 
 
 # ── Symbol management ─────────────────────────────────────────────────────────
