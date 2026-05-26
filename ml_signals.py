@@ -14,8 +14,9 @@ logger = logging.getLogger(__name__)
 CACHE_DIR = os.path.join(os.path.dirname(__file__), ".model_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-RETRAIN_EVERY = 21600          # 6-hour fallback
-RETRAIN_OUTCOME_THRESHOLD = 3  # retrain after this many new outcomes since last train
+RETRAIN_EVERY = int(os.getenv("RETRAIN_EVERY_SECONDS", "7200"))  # 2-hour fallback
+RETRAIN_OUTCOME_THRESHOLD = int(os.getenv("RETRAIN_OUTCOME_THRESHOLD", "3"))
+AI_SIGNAL_THRESHOLD = float(os.getenv("AI_SIGNAL_THRESHOLD", "0.65"))
 
 
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -199,9 +200,9 @@ class StockModel:
             sell_prob = float(self.clf_sell.predict_proba(X)[0][1])
 
             ai_signal = None
-            if buy_prob > 0.65:
+            if buy_prob > AI_SIGNAL_THRESHOLD:
                 ai_signal = "BUY"
-            elif sell_prob > 0.65:
+            elif sell_prob > AI_SIGNAL_THRESHOLD:
                 ai_signal = "SELL"
 
             return {"buy_prob": buy_prob, "sell_prob": sell_prob, "ai_signal": ai_signal}

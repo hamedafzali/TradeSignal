@@ -110,6 +110,17 @@ def init_db() -> None:
                 new_outcomes  INTEGER DEFAULT 0,
                 note          TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS action_requests (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                action        TEXT NOT NULL,
+                symbol        TEXT,
+                requested_at  TEXT NOT NULL,
+                status        TEXT DEFAULT 'pending',
+                requested_by  TEXT DEFAULT 'dashboard',
+                result_note   TEXT,
+                completed_at  TEXT
+            );
         """)
         # Migrate existing positions table if tp/sl columns missing
         cols = [r[1] for r in conn.execute("PRAGMA table_info(positions)").fetchall()]
@@ -319,6 +330,96 @@ def get_symbol_outcome_profile(symbol: str, lookback_days: int = 60) -> dict:
         "avg_adverse_pct": round(sum(mae) / len(mae), 2) if mae else None,
         "timeout_rate": round(timeout_count / total, 3) if total else 0.0,
         "ambiguous_rate": round(ambiguous_count / total, 3) if total else 0.0,
+    }
+
+
+def create_action_request(action: str, symbol: str | None = None,
+                          requested_by: str = "dashboard") -> int:
+    with _conn() as conn:
+        cur = conn.execute("""
+            INSERT INTO action_requests (action, symbol, requested_at, requested_by)
+            VALUES (?, ?, ?, ?)
+        """, (
+            action,
+            symbol.upper() if symbol else None,
+            datetime.utcnow().isoformat(),
+            requested_by,
+        ))
+        return cur.lastrowid
+
+
+def get_pending_action_requests(limit: int = 20) -> list[dict]:
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT * FROM action_requests
+            WHERE status = 'pending'
+            ORDER BY requested_at ASC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def complete_action_request(request_id: int, status: str, result_note: str = "") -> None:
+    with _conn() as conn:
+        conn.execute("""
+            UPDATE action_requests
+            SET status = ?, result_note = ?, completed_at = ?
+            WHERE id = ?
+        """, (status, result_note, datetime.utcnow().isoformat(), request_id))
+
+
+def get_recent_action_requests(limit: int = 25) -> list[dict]:
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT * FROM action_requests
+            ORDER BY requested_at DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_ops_snapshot() -> dict:
+    with _conn() as conn:
+        total_pending_actions = conn.execute(
+            "SELECT COUNT(*) FROM action_requests WHERE status = 'pending'"
+        ).fetchone()[0]
+        last_action = conn.execute("""
+            SELECT action, symbol, status, requested_at, completed_at, result_note
+            FROM action_requests ORDER BY id DESC LIMIT 1
+        """).fetchone()
+        last_signal = conn.execute("""
+            SELECT symbol, action, sent_at, strength
+            FROM signals ORDER BY sent_at DESC LIMIT 1
+        """).fetchone()
+        last_outcome = conn.execute("""
+            SELECT symbol, outcome, outcome_at, resolution_reason
+            FROM signals
+            WHERE outcome != 'pending'
+            ORDER BY outcome_at DESC LIMIT 1
+        """).fetchone()
+        last_cycle = conn.execute("""
+            SELECT symbol, checked_at, retrained, note
+            FROM ml_cycle_log ORDER BY checked_at DESC LIMIT 1
+        """).fetchone()
+        last_train = conn.execute("""
+            SELECT symbol, trained_at, outcome_samples
+            FROM ml_training_log ORDER BY trained_at DESC LIMIT 1
+        """).fetchone()
+        pending_outcomes = conn.execute(
+            "SELECT COUNT(*) FROM signals WHERE outcome = 'pending'"
+        ).fetchone()[0]
+        active_symbols = get_active_symbols()
+    return {
+        "active_symbols": active_symbols,
+        "active_symbol_count": len(active_symbols),
+        "pending_actions": total_pending_actions,
+        "pending_outcomes": pending_outcomes,
+        "last_action": dict(last_action) if last_action else None,
+        "last_signal": dict(last_signal) if last_signal else None,
+        "last_outcome": dict(last_outcome) if last_outcome else None,
+        "last_cycle": dict(last_cycle) if last_cycle else None,
+        "last_train": dict(last_train) if last_train else None,
+        "recent_actions": get_recent_action_requests(12),
     }
 
 
@@ -771,11 +872,20 @@ def get_ml_accuracy_stats() -> dict:
                 round(b["correct"] / b["total"] * 100, 1) if b["total"] > 0 else None
             )
 
+        trained_model_count = sum(1 for sym in all_symbols if training.get(sym))
+        ai_totals = [d["ai_total"] for d in per_symbol.values()]
+        ai_acc_values = [d["ai_accuracy"] for d in per_symbol.values() if d["ai_accuracy"] is not None]
         return {
             "per_symbol": per_symbol,
             "confidence_buckets": [
                 {"label": lbl, **buckets_global[lbl]} for lbl in bucket_labels
             ],
+            "summary": {
+                "active_symbol_count": len(all_symbols),
+                "trained_model_count": trained_model_count,
+                "ai_resolved_signals": sum(ai_totals),
+                "avg_ai_accuracy": round(sum(ai_acc_values) / len(ai_acc_values), 1) if ai_acc_values else None,
+            },
         }
 
 

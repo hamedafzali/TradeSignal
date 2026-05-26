@@ -24,7 +24,9 @@ from telegram.ext import (
 from backtest import format_backtest_message, run_backtest
 from lang import t, signal_msg, tp_sl_alert, sell_alert as _sell_alert_msg
 from database import (
+    complete_action_request,
     close_position,
+    create_action_request,
     get_active_symbols,
     get_all_open_positions,
     get_all_subscriber_ids,
@@ -32,6 +34,8 @@ from database import (
     get_latest_signal,
     get_outcome_count,
     get_outcome_training_data,
+    get_pending_action_requests,
+    get_recent_action_requests,
     get_pending_outcomes,
     get_pending_outcomes_recent,
     get_stats,
@@ -74,6 +78,10 @@ SYMBOLS = [s.strip() for s in os.getenv(
 ).split(",")]
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL_MINUTES", "5")) * 60
 OUTCOME_CHECK_HOURS = int(os.getenv("OUTCOME_CHECK_HOURS", "24"))
+OUTCOME_CHECK_INTERVAL = int(os.getenv("OUTCOME_CHECK_INTERVAL_MINUTES", "10")) * 60
+LEARNING_CHECK_INTERVAL = int(os.getenv("LEARNING_CHECK_INTERVAL_MINUTES", "10")) * 60
+ACTION_QUEUE_INTERVAL = int(os.getenv("ACTION_QUEUE_INTERVAL_SECONDS", "60"))
+ENABLE_SUBSCRIBER_DM_SIGNALS = os.getenv("ENABLE_SUBSCRIBER_DM_SIGNALS", "false").lower() == "true"
 
 ET = ZoneInfo("America/New_York")
 
@@ -368,6 +376,44 @@ async def continuous_learning(context: ContextTypes.DEFAULT_TYPE) -> None:
             pass
 
 
+async def process_action_requests(context: ContextTypes.DEFAULT_TYPE) -> None:
+    pending = get_pending_action_requests()
+    if not pending:
+        return
+    for req in pending:
+        action = req["action"]
+        symbol = req.get("symbol")
+        try:
+            if action == "scan_now":
+                await scan_and_alert(context)
+                note = "manual scan completed"
+            elif action == "check_outcomes_now":
+                await check_outcomes(context)
+                note = "manual outcome check completed"
+            elif action == "retrain_all":
+                for model in models.values():
+                    model.trained_at = 0
+                await _ensure_models_trained(context.bot)
+                note = "all models retrained"
+            elif action == "retrain_symbol":
+                if not symbol:
+                    raise ValueError("symbol required")
+                model = models.get(symbol)
+                if model is None:
+                    raise ValueError(f"unknown symbol {symbol}")
+                model.trained_at = 0
+                ok = model.train(get_outcome_training_data(symbol=symbol) or None)
+                if not ok:
+                    raise RuntimeError(f"{symbol} retrain failed")
+                note = f"{symbol} retrained"
+            else:
+                raise ValueError(f"unsupported action {action}")
+            complete_action_request(req["id"], "completed", note)
+        except Exception as e:
+            logger.error(f"Action request {req['id']} failed: {e}")
+            complete_action_request(req["id"], "failed", str(e)[:200])
+
+
 # ── Live TP/SL monitor ────────────────────────────────────────────────────────
 
 async def monitor_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -473,11 +519,12 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
                 for uid in get_users_with_open_position(symbol):
                     await _send_private_sell(context.bot, uid, sig)
 
-            # Notify symbol subscribers who have not opened a position
-            open_users = set(get_users_with_open_position(symbol))
-            for uid in get_subscribers_for_symbol(symbol):
-                if uid not in open_users:
-                    await _send_subscriber_alert(context.bot, uid, sig)
+            # Optional private signal sharing for explicit user subscriptions
+            if ENABLE_SUBSCRIBER_DM_SIGNALS:
+                open_users = set(get_users_with_open_position(symbol))
+                for uid in get_subscribers_for_symbol(symbol):
+                    if uid not in open_users:
+                        await _send_subscriber_alert(context.bot, uid, sig)
 
         except Exception as e:
             logger.error(f"Error scanning {symbol}: {e}")
@@ -1430,10 +1477,12 @@ def main() -> None:
     app.job_queue.run_repeating(refresh_symbols, interval=300, first=30)
     # Scan every SCAN_INTERVAL seconds
     app.job_queue.run_repeating(scan_and_alert, interval=SCAN_INTERVAL, first=10)
-    # Check pending outcomes every 30 minutes (also catches 1h-old recent signals)
-    app.job_queue.run_repeating(check_outcomes, interval=1800, first=300)
-    # Continuous learning: retrain any symbol with new outcomes every 20 minutes
-    app.job_queue.run_repeating(continuous_learning, interval=1200, first=120)
+    # Check pending outcomes frequently so resolved trades feed learning faster
+    app.job_queue.run_repeating(check_outcomes, interval=OUTCOME_CHECK_INTERVAL, first=180)
+    # Continuous learning: re-check all symbols on a shorter cadence
+    app.job_queue.run_repeating(continuous_learning, interval=LEARNING_CHECK_INTERVAL, first=120)
+    # Operator action queue from dashboard controls
+    app.job_queue.run_repeating(process_action_requests, interval=ACTION_QUEUE_INTERVAL, first=30)
     # Monitor open positions for TP/SL every 5 minutes
     app.job_queue.run_repeating(monitor_positions, interval=300, first=60)
     # Weekly recap: every Monday at 9:00 UTC
