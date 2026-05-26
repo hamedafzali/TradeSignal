@@ -1209,6 +1209,9 @@ _SETTING_DEFAULTS = {
     "news_provider": "disabled",               # disabled / finnhub
     "finnhub_api_key": "",
     "news_lookback_hours": "6",
+    "channel_lang": "fa",                      # fa / en
+    "channel_mode": "beginner",                # beginner / expert
+    "outcome_notify_admin": "false",           # true / false
 }
 
 

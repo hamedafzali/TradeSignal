@@ -519,6 +519,31 @@ _HTML = """<!DOCTYPE html>
                 step="1" min="1" max="48" placeholder="6">
             </div>
 
+            <div class="col-md-4">
+              <label class="small text-muted">Channel Language</label>
+              <select id="set-channel_lang" class="form-control mt-1">
+                <option value="fa">🇮🇷 فارسی (Persian)</option>
+                <option value="en">🇬🇧 English</option>
+              </select>
+            </div>
+
+            <div class="col-md-4">
+              <label class="small text-muted">Channel Signal Style</label>
+              <select id="set-channel_mode" class="form-control mt-1">
+                <option value="beginner">Beginner (simple explanation)</option>
+                <option value="expert">Expert (indicators & data)</option>
+              </select>
+            </div>
+
+            <div class="col-md-4">
+              <label class="small text-muted">Outcome Notifications in DM</label>
+              <select id="set-outcome_notify_admin" class="form-control mt-1">
+                <option value="false">Disabled (no DM for outcomes)</option>
+                <option value="true">Enabled (send to admin DM)</option>
+              </select>
+              <div class="small mt-1" style="color:#555">Outcome results are always visible in the dashboard</div>
+            </div>
+
           </div>
           <div class="d-flex gap-3 align-items-center mt-3">
             <button class="btn" style="background:#1a3a4a;color:#38bdf8;border:1px solid #38bdf840;padding:6px 20px"
@@ -863,7 +888,8 @@ async function refreshML() {
 async function loadSettings() {
   const s = await fetch('/api/settings').then(r => r.json());
   const keys = ['sentiment_provider','news_provider','sentiment_suppress_threshold',
-                 'finnhub_api_key','gemini_api_key','claude_api_key','sentiment_local_url','news_lookback_hours'];
+                 'finnhub_api_key','gemini_api_key','claude_api_key','sentiment_local_url','news_lookback_hours',
+                 'channel_lang','channel_mode','outcome_notify_admin'];
   for (const k of keys) {
     const el = document.getElementById('set-' + k);
     if (el && s[k] !== undefined) el.value = s[k];
@@ -889,7 +915,8 @@ async function saveSettings() {
   msg.style.color = '#8b8fa8';
   msg.textContent = 'Saving…';
   const keys = ['sentiment_provider','news_provider','sentiment_suppress_threshold',
-                 'finnhub_api_key','gemini_api_key','claude_api_key','sentiment_local_url','news_lookback_hours'];
+                 'finnhub_api_key','gemini_api_key','claude_api_key','sentiment_local_url','news_lookback_hours',
+                 'channel_lang','channel_mode','outcome_notify_admin'];
   const payload = {};
   for (const k of keys) {
     const el = document.getElementById('set-' + k);
@@ -1518,6 +1545,7 @@ def api_settings_post():
     allowed_keys = {
         "sentiment_provider", "sentiment_local_url", "claude_api_key", "gemini_api_key",
         "sentiment_suppress_threshold", "news_provider", "finnhub_api_key",
+        "channel_lang", "channel_mode", "outcome_notify_admin",
         "news_lookback_hours",
     }
     for key, value in data.items():

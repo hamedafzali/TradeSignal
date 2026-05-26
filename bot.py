@@ -28,6 +28,7 @@ from lang import t, signal_msg, tp_sl_alert, sell_alert as _sell_alert_msg
 from database import (
     complete_action_request,
     close_position,
+    get_setting,
     create_action_request,
     get_active_symbols,
     get_all_open_positions,
@@ -300,7 +301,7 @@ async def check_outcomes(context: ContextTypes.DEFAULT_TYPE) -> None:
             sign = "+" if pct >= 0 else ""
             emoji = {"correct": "✅", "incorrect": "❌", "neutral": "➖"}.get(outcome, "❓")
 
-            if ADMIN_CHAT_ID:
+            if ADMIN_CHAT_ID and get_setting("outcome_notify_admin", "false") == "true":
                 tp_text = f"\nTP: `${tp:.2f}` | SL: `${sig.get('sl', 0):.2f}`" if tp else ""
                 await context.bot.send_message(
                     chat_id=ADMIN_CHAT_ID,
@@ -320,7 +321,6 @@ async def check_outcomes(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def refresh_sentiment_cache(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Refresh news sentiment for all symbols every 30 min. Never blocks scan."""
-    from database import get_setting
     if get_setting("sentiment_provider", "disabled") == "disabled":
         return
     symbols = _get_symbols()
@@ -699,7 +699,13 @@ def _channel_message(sig: dict, session: str) -> str:
 async def _broadcast_signal(bot, sig: dict, session: str = "open") -> None:
     if not CHANNEL_ID:
         return
-    body = _channel_message(sig, session)
+    ch_lang = get_setting("channel_lang", "fa")
+    ch_mode = get_setting("channel_mode", "beginner")
+    body = signal_msg(sig, lang=ch_lang, mode=ch_mode)
+    # Append timestamp footer
+    et_time = datetime.now(ET).strftime("%H:%M ET")
+    session_label = "  ·  🌅 پیش‌بازار" if (session == "pre" and ch_lang == "fa") else ("  ·  🌅 Pre-market" if session == "pre" else "")
+    body += f"\n━━━━━━━━━━━━━━━━━━━\n⏱ `{et_time}`{session_label}  ·  #{sig['symbol']}"
     if sig["action"] == "BUY" and BOT_USERNAME:
         deep_link = (
             f"https://t.me/{BOT_USERNAME}?start="
