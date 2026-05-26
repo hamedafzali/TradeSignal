@@ -38,7 +38,7 @@ services:
     build: ./sentiment_service
     container_name: tradesignal-finbert
     ports:
-      - "5001:5001"
+      - "5004:5001"
     volumes:
       - finbert_cache:/root/.cache/huggingface
     restart: unless-stopped
