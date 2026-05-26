@@ -20,6 +20,26 @@ _HTML = """<!DOCTYPE html>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
+  /* Override Bootstrap 5 CSS variables so all components inherit dark theme */
+  :root {
+    --bs-body-color: #e0e0e0;
+    --bs-body-bg: #0f1117;
+    --bs-secondary-color: #8b8fa8;
+    --bs-border-color: #2a2d3a;
+    --bs-table-color: #e0e0e0;
+    --bs-table-bg: transparent;
+    --bs-table-border-color: #2a2d3a;
+    --bs-table-striped-color: #e0e0e0;
+    --bs-table-hover-color: #e0e0e0;
+    --bs-card-color: #e0e0e0;
+    --bs-heading-color: #e0e0e0;
+    --bs-link-color: #38bdf8;
+    --bs-link-hover-color: #7dd3fc;
+    --bs-emphasis-color: #ffffff;
+    --bs-secondary-bg: #1a1d27;
+    --bs-tertiary-bg: #0f1117;
+    --bs-tertiary-color: #555;
+  }
   body { background:#0f1117; color:#e0e0e0; }
   .card { background:#1a1d27; border:1px solid #2a2d3a; }
   .card-title { color:#8b8fa8; font-size:.75rem; text-transform:uppercase; letter-spacing:.08em; }
@@ -57,6 +77,20 @@ _HTML = """<!DOCTYPE html>
   .btn-del:hover  { background:#5a1f1f; color:#f87171; }
   .training-chip { font-size:.72rem; color:#8b8fa8; background:#1a1d27;
                    border:1px solid #2a2d3a; border-radius:4px; padding:1px 6px; }
+  /* Bootstrap text utilities on dark background */
+  .text-muted { color:#8b8fa8 !important; }
+  .text-body  { color:#e0e0e0 !important; }
+  /* Bootstrap table resets */
+  .table { --bs-table-color:#e0e0e0; --bs-table-bg:transparent;
+           --bs-table-border-color:#2a2d3a; color:#e0e0e0; }
+  .table td, .table th { color:#e0e0e0; }
+  /* Dropdowns */
+  .dropdown-menu { background:#1a1d27; border-color:#2a2d3a; }
+  .dropdown-item { color:#e0e0e0; }
+  .dropdown-item:hover { background:#0f1117; color:#e0e0e0; }
+  /* Modal */
+  .modal-content { background:#1a1d27; color:#e0e0e0; border-color:#2a2d3a; }
+  .modal-header, .modal-footer { border-color:#2a2d3a; }
   .health-card { background:#0f1117; border-radius:8px; padding:14px 16px; border:1px solid #2a2d3a; }
   .trend-up   { color:#4ade80 }
   .trend-down { color:#f87171 }
@@ -289,6 +323,14 @@ _HTML = """<!DOCTYPE html>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
+// Global Chart.js dark theme defaults
+Chart.defaults.color = '#8b8fa8';
+Chart.defaults.plugins.tooltip.backgroundColor = '#1a1d27';
+Chart.defaults.plugins.tooltip.titleColor = '#e0e0e0';
+Chart.defaults.plugins.tooltip.bodyColor = '#8b8fa8';
+Chart.defaults.plugins.tooltip.borderColor = '#2a2d3a';
+Chart.defaults.plugins.tooltip.borderWidth = 1;
+
 let dailyChart, symbolChart, bucketsChart, strengthChart;
 
 function badge(text, cls) {
