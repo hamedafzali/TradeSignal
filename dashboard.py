@@ -294,7 +294,7 @@ _HTML = """<!DOCTYPE html>
       <!-- Training event log -->
       <div class="col-md-6">
         <div class="card p-3 h-100">
-          <h6 class="mb-3">📋 Training Event Log</h6>
+          <h6 class="mb-3">📋 Learning Cycle Log</h6>
           <div id="train-log" style="max-height:420px;overflow-y:auto"></div>
         </div>
       </div>
@@ -706,7 +706,8 @@ async function refreshActivity() {
           </div>
           <div class="mt-2" style="font-size:.72rem;color:#555">
             <span>📊 ${h.total_outcomes} outcomes · ⏳ ${h.pending} pending</span><br>
-            <span>🕒 Trained ${modelAge(h.last_trained)}</span>
+            <span>🕒 Trained ${modelAge(h.last_trained)} · Checked ${modelAge(h.last_checked)}</span><br>
+            <span>✅ ${h.recent_successes} success · ❌ ${h.recent_failures} failure</span>
           </div>
         </div>
       </div>`;
@@ -810,25 +811,48 @@ async function refreshActivity() {
     : '<div style="color:#555">Not enough resolved outcome data yet for adaptive TP/SL guidance.</div>';
 
   // ── Training event log ──
-  const events = data.training_events || [];
-  document.getElementById('train-log').innerHTML = events.length
-    ? events.map(e => {
-        const cls = e.outcome_samples > 0 ? 'has-outcomes' : '';
-        const trigger = e.outcome_samples >= 3
-          ? `<span style="color:#a78bfa">⚡ ${e.outcome_samples} outcomes triggered</span>`
-          : `<span style="color:#38bdf8">⏱ time-based</span>`;
-        return `<div class="event-row ${cls}">
+  const trainEvents = data.training_events || [];
+  const cycleEvents = data.cycle_events || [];
+  const learningEvents = [
+    ...trainEvents.map(e => ({kind:'train', at:e.trained_at, ...e})),
+    ...cycleEvents.map(e => ({kind:'cycle', at:e.checked_at, ...e})),
+  ].sort((a,b) => new Date(b.at+'Z') - new Date(a.at+'Z')).slice(0, 60);
+  document.getElementById('train-log').innerHTML = learningEvents.length
+    ? learningEvents.map(e => {
+        if (e.kind === 'train') {
+          const cls = e.outcome_samples > 0 ? 'has-outcomes' : '';
+          const trigger = e.outcome_samples >= 3
+            ? `<span style="color:#a78bfa">⚡ ${e.outcome_samples} outcomes triggered</span>`
+            : `<span style="color:#38bdf8">⏱ time-based</span>`;
+          return `<div class="event-row ${cls}">
+            <div class="d-flex justify-content-between">
+              <strong style="color:#e0e0e0">${e.symbol}</strong>
+              <span style="color:#555">${new Date(e.trained_at+'Z').toLocaleString()}</span>
+            </div>
+            <div class="mt-1">
+              <span style="color:#4ade80">🧠 retrained</span> &nbsp;·&nbsp; ${trigger} &nbsp;·&nbsp;
+              <span style="color:#8b8fa8">${e.train_samples} samples trained</span>
+              ${e.outcome_samples > 0 ? `&nbsp;·&nbsp;<span style="color:#fbbf24">${e.outcome_samples} real outcomes blended (3× weight)</span>` : ''}
+            </div>
+          </div>`;
+        }
+        const cycleCls = e.retrained ? 'has-outcomes' : '';
+        const needed = e.retrain_needed ? '<span style="color:#fbbf24">needs retrain</span>' : '<span style="color:#38bdf8">check only</span>';
+        const result = e.retrained ? '<span style="color:#4ade80">retrained</span>' : '<span style="color:#8b8fa8">no retrain</span>';
+        return `<div class="event-row ${cycleCls}">
           <div class="d-flex justify-content-between">
             <strong style="color:#e0e0e0">${e.symbol}</strong>
-            <span style="color:#555">${new Date(e.trained_at+'Z').toLocaleString()}</span>
+            <span style="color:#555">${new Date(e.checked_at+'Z').toLocaleString()}</span>
           </div>
-          <div class="mt-1">${trigger} &nbsp;·&nbsp;
-            <span style="color:#8b8fa8">${e.train_samples} samples trained</span>
-            ${e.outcome_samples > 0 ? `&nbsp;·&nbsp;<span style="color:#fbbf24">${e.outcome_samples} real outcomes blended (3× weight)</span>` : ''}
+          <div class="mt-1">
+            ${needed} &nbsp;·&nbsp; ${result} &nbsp;·&nbsp;
+            <span style="color:#8b8fa8">${e.resolved_outcomes} resolved</span>
+            &nbsp;·&nbsp;<span style="color:#a78bfa">${e.new_outcomes} new since last train</span>
+            ${e.note ? `&nbsp;·&nbsp;<span style="color:#555">${e.note}</span>` : ''}
           </div>
         </div>`;
       }).join('')
-    : '<div style="color:#555;font-size:.85rem">No training runs yet. The model will train automatically on startup and then every time 3 new outcomes resolve.</div>';
+    : '<div style="color:#555;font-size:.85rem">No learning-cycle events yet. Once the bot is running, this log updates every 20 minutes even when it only checks and decides not to retrain.</div>';
 
   // ── Outcome feed ──
   const outcomes = data.recent_outcomes || [];
@@ -870,13 +894,13 @@ async function refreshActivity() {
   for (const [sym, h] of Object.entries(health)) {
     if (h.total_outcomes === 0) {
       sugs.push({cls:'sug-info', icon:'ℹ️',
-        text:`<strong>${sym}</strong>: no outcomes resolved yet — model is running on market data only, no real feedback loop active`});
+        text:`<strong>${sym}</strong>: no outcomes resolved yet — model has no validated success/failure feedback yet, so suggestions are still provisional`});
     } else if (h.recent_acc < 45 && h.recent_count >= 5) {
       sugs.push({cls:'sug-warn', icon:'⚠️',
-        text:`<strong>${sym}</strong>: recent accuracy ${h.recent_acc}% is below 45% on last ${h.recent_count} outcomes — model may be overfitting or market conditions changed`});
+        text:`<strong>${sym}</strong>: recent accuracy ${h.recent_acc}% is below 45% on last ${h.recent_count} validated outcomes (${h.recent_successes} success / ${h.recent_failures} failure) — model may be overfitting or market conditions changed`});
     } else if (h.recent_unclear >= 3) {
       sugs.push({cls:'sug-warn', icon:'🌀',
-        text:`<strong>${sym}</strong>: ${h.recent_unclear} of the last ${h.recent_count} outcomes were ambiguous or timed out — TP/SL may be too tight for current volatility`});
+        text:`<strong>${sym}</strong>: ${h.recent_unclear} of the last ${h.recent_count} validated outcomes were ambiguous or timed out — this suggestion is based on observed label quality, not just a static rule`});
     } else if (h.ambiguous_count >= 3) {
       sugs.push({cls:'sug-info', icon:'↔️',
         text:`<strong>${sym}</strong>: ${h.ambiguous_count} outcomes touched TP and SL in the same candle — consider wider stops or a higher timeframe for clearer labeling`});
@@ -888,7 +912,7 @@ async function refreshActivity() {
         text:`<strong>${sym}</strong>: accuracy declining (recent ${h.recent_acc}% vs all-time ${h.all_acc}%) — more outcomes are needed to retrain`});
     } else if (h.trend === 'improving') {
       sugs.push({cls:'sug-ok', icon:'📈',
-        text:`<strong>${sym}</strong>: accuracy improving! Recent ${h.recent_acc}% vs all-time ${h.all_acc}% — continuous learning is working`});
+        text:`<strong>${sym}</strong>: accuracy improving! Recent ${h.recent_acc}% vs all-time ${h.all_acc}% (${h.recent_successes} validated wins recently) — continuous learning is working`});
     } else if (h.avg_resolution_minutes !== null && h.avg_resolution_minutes > 720) {
       sugs.push({cls:'sug-info', icon:'🕒',
         text:`<strong>${sym}</strong>: outcomes take ${Math.round(h.avg_resolution_minutes)} minutes on average — consider a longer signal horizon or slower scan framing`});

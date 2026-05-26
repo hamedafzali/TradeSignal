@@ -99,6 +99,17 @@ def init_db() -> None:
                 train_samples INTEGER,
                 outcome_samples INTEGER DEFAULT 0
             );
+
+            CREATE TABLE IF NOT EXISTS ml_cycle_log (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol        TEXT NOT NULL,
+                checked_at    TEXT NOT NULL,
+                retrain_needed INTEGER DEFAULT 0,
+                retrained     INTEGER DEFAULT 0,
+                resolved_outcomes INTEGER DEFAULT 0,
+                new_outcomes  INTEGER DEFAULT 0,
+                note          TEXT
+            );
         """)
         # Migrate existing positions table if tp/sl columns missing
         cols = [r[1] for r in conn.execute("PRAGMA table_info(positions)").fetchall()]
@@ -629,6 +640,24 @@ def log_training(symbol: str, train_samples: int, outcome_samples: int = 0) -> N
         """, (symbol, datetime.utcnow().isoformat(), train_samples, outcome_samples))
 
 
+def log_learning_cycle(symbol: str, retrain_needed: bool, retrained: bool,
+                       resolved_outcomes: int, new_outcomes: int, note: str = "") -> None:
+    with _conn() as conn:
+        conn.execute("""
+            INSERT INTO ml_cycle_log
+                (symbol, checked_at, retrain_needed, retrained, resolved_outcomes, new_outcomes, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            symbol,
+            datetime.utcnow().isoformat(),
+            int(retrain_needed),
+            int(retrained),
+            resolved_outcomes,
+            new_outcomes,
+            note,
+        ))
+
+
 def get_ml_accuracy_stats() -> dict:
     """
     Returns per-symbol ML accuracy derived from resolved signals that had
@@ -653,6 +682,8 @@ def get_ml_accuracy_stats() -> dict:
             )
         """).fetchall()
         training = {r["symbol"]: dict(r) for r in train_rows}
+        active_symbols = set(get_active_symbols())
+        all_symbols = set(active_symbols) | set(training.keys())
 
         # Total training runs per symbol
         run_counts = conn.execute("""
@@ -722,6 +753,19 @@ def get_ml_accuracy_stats() -> dict:
             d["training"] = training.get(sym)
             d["train_runs"] = run_map.get(sym, 0)
 
+        for sym in sorted(all_symbols):
+            if sym not in per_symbol:
+                per_symbol[sym] = {
+                    "ai_total": 0, "ai_correct": 0,
+                    "strong_total": 0, "strong_correct": 0,
+                    "rule_total": 0, "rule_correct": 0,
+                    "ai_accuracy": None,
+                    "strong_accuracy": None,
+                    "rule_accuracy": None,
+                    "training": training.get(sym),
+                    "train_runs": run_map.get(sym, 0),
+                }
+
         for lbl, b in buckets_global.items():
             b["accuracy"] = (
                 round(b["correct"] / b["total"] * 100, 1) if b["total"] > 0 else None
@@ -745,21 +789,26 @@ def get_ml_activity_log(limit: int = 40, symbol: str | None = None,
     """
     filters = []
     params: list = []
+    cycle_filters = []
+    cycle_params: list = []
     outcome_filters = []
     outcome_params: list = []
     if symbol:
         filters.append("symbol = ?")
         params.append(symbol.upper())
+        cycle_filters.append("symbol = ?")
+        cycle_params.append(symbol.upper())
         outcome_filters.append("symbol = ?")
         outcome_params.append(symbol.upper())
     if days and days > 0:
         cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
         filters.append("trained_at >= ?")
         params.append(cutoff)
+        cycle_filters.append("checked_at >= ?")
+        cycle_params.append(cutoff)
         outcome_filters.append("outcome_at >= ?")
         outcome_params.append(cutoff)
     train_where = f"WHERE {' AND '.join(filters)}" if filters else ""
-    outcome_where = f"WHERE {' AND '.join(outcome_filters)}" if outcome_filters else ""
 
     with _conn() as conn:
         train_rows = conn.execute("""
@@ -768,6 +817,16 @@ def get_ml_activity_log(limit: int = 40, symbol: str | None = None,
             {train_where}
             ORDER BY id DESC LIMIT ?
         """.format(train_where=train_where), (*params, limit)).fetchall()
+
+        cycle_rows = conn.execute("""
+            SELECT symbol, checked_at, retrain_needed, retrained,
+                   resolved_outcomes, new_outcomes, note
+            FROM ml_cycle_log
+            {cycle_where}
+            ORDER BY id DESC LIMIT ?
+        """.format(
+            cycle_where=("WHERE " + " AND ".join(cycle_filters)) if cycle_filters else ""
+        ), (*cycle_params, limit)).fetchall()
 
         outcome_rows = conn.execute("""
             SELECT symbol, action, strength, price, outcome, outcome_at,
@@ -813,6 +872,15 @@ def get_ml_activity_log(limit: int = 40, symbol: str | None = None,
             GROUP BY symbol
         """.format(train_where=train_where), params).fetchall()
 
+        last_cycle = conn.execute("""
+            SELECT symbol, MAX(checked_at) AS last_checked
+            FROM ml_cycle_log
+            {cycle_where}
+            GROUP BY symbol
+        """.format(
+            cycle_where=("WHERE " + " AND ".join(cycle_filters)) if cycle_filters else ""
+        ), cycle_params).fetchall()
+
         available_symbols_rows = conn.execute("""
             SELECT DISTINCT symbol FROM signals ORDER BY symbol
         """).fetchall()
@@ -824,19 +892,24 @@ def get_ml_activity_log(limit: int = 40, symbol: str | None = None,
 
     pending_map = {r["symbol"]: r["cnt"] for r in pending_rows}
     last_train_map = {r["symbol"]: dict(r) for r in last_train}
+    last_cycle_map = {r["symbol"]: dict(r) for r in last_cycle}
+    all_active_symbols = set(get_active_symbols())
 
     symbol_health = {}
     resolution_reason_counts: dict[str, int] = {}
-    for sym, outcomes in sym_outcomes.items():
+    all_symbols = sorted(set(sym_outcomes.keys()) | set(last_train_map.keys()) | set(last_cycle_map.keys()) | all_active_symbols)
+    for sym in all_symbols:
+        outcomes = sym_outcomes.get(sym, [])
         last10 = outcomes[:10]
         correct = sum(1 for o in last10 if o["outcome"] == "correct")
-        recent_acc = round(correct / len(last10) * 100, 1)
+        recent_acc = round(correct / len(last10) * 100, 1) if last10 else 0.0
         all_correct = sum(1 for o in outcomes if o["outcome"] == "correct")
-        all_acc = round(all_correct / len(outcomes) * 100, 1)
+        all_acc = round(all_correct / len(outcomes) * 100, 1) if outcomes else 0.0
         trend = "improving" if len(last10) >= 5 and recent_acc > all_acc else (
             "declining" if len(last10) >= 5 and recent_acc < all_acc - 5 else "stable"
         )
         lt = last_train_map.get(sym, {})
+        lc = last_cycle_map.get(sym, {})
         recent_neutral_like = sum(
             1 for o in last10 if o.get("resolution_reason") in ("both_hit_same_candle", "timeout_no_hit")
         )
@@ -853,10 +926,13 @@ def get_ml_activity_log(limit: int = 40, symbol: str | None = None,
             "all_acc": all_acc,
             "recent_count": len(last10),
             "total_outcomes": len(outcomes),
+            "recent_successes": sum(1 for o in last10 if o["outcome"] == "correct"),
+            "recent_failures": sum(1 for o in last10 if o["outcome"] == "incorrect"),
             "trend": trend,
             "pending": pending_map.get(sym, 0),
             "last_trained": lt.get("last_trained"),
             "last_outcome_samples": lt.get("last_outcome_samples", 0),
+            "last_checked": lc.get("last_checked"),
             "ambiguous_count": ambiguous_count,
             "timeout_count": timeout_count,
             "recent_unclear": recent_neutral_like,
@@ -889,6 +965,7 @@ def get_ml_activity_log(limit: int = 40, symbol: str | None = None,
 
     return {
         "training_events": [dict(r) for r in train_rows],
+        "cycle_events": [dict(r) for r in cycle_rows],
         "recent_outcomes": [
             {**dict(r), "reasons": json.loads(r["reasons"] or "[]")}
             for r in outcome_rows

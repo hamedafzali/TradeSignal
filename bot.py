@@ -43,6 +43,7 @@ from database import (
     get_users_with_open_position,
     get_weekly_stats,
     init_db,
+    log_learning_cycle,
     log_signal,
     log_user,
     open_position,
@@ -315,11 +316,29 @@ async def continuous_learning(context: ContextTypes.DEFAULT_TYPE) -> None:
             continue
         try:
             current_count = get_outcome_count(symbol)
-            if not model.needs_retrain(current_outcome_count=current_count):
+            new_outcomes = current_count - getattr(model, "outcome_count_at_train", 0)
+            needs_retrain = model.needs_retrain(current_outcome_count=current_count)
+            if not needs_retrain:
+                log_learning_cycle(
+                    symbol,
+                    retrain_needed=False,
+                    retrained=False,
+                    resolved_outcomes=current_count,
+                    new_outcomes=max(0, new_outcomes),
+                    note="check_only",
+                )
                 continue
 
             outcome_data = get_outcome_training_data(symbol=symbol)
             ok = model.train(outcome_data or None)
+            log_learning_cycle(
+                symbol,
+                retrain_needed=True,
+                retrained=ok,
+                resolved_outcomes=current_count,
+                new_outcomes=max(0, new_outcomes),
+                note="retrained" if ok else "retrain_failed",
+            )
             if ok:
                 retrained.append(symbol)
                 logger.info(
@@ -327,6 +346,14 @@ async def continuous_learning(context: ContextTypes.DEFAULT_TYPE) -> None:
                     f"{current_count - model.outcome_count_at_train}"
                 )
         except Exception as e:
+            log_learning_cycle(
+                symbol,
+                retrain_needed=False,
+                retrained=False,
+                resolved_outcomes=0,
+                new_outcomes=0,
+                note=f"error:{type(e).__name__}",
+            )
             logger.error(f"[ML] continuous_learning error for {symbol}: {e}")
 
     if retrained and ADMIN_CHAT_ID:
