@@ -146,14 +146,12 @@ def get_1h_bias(symbol: str) -> tuple[str | None, pd.DataFrame | None]:
         ema21 = close.ewm(span=21, adjust=False).mean()
 
         rsi_now = float(rsi.iloc[-1])
-        macd_bull = (float(macd_line.iloc[-2]) < float(signal_line.iloc[-2])
-                     and float(macd_line.iloc[-1]) > float(signal_line.iloc[-1]))
-        macd_bear = (float(macd_line.iloc[-2]) > float(signal_line.iloc[-2])
-                     and float(macd_line.iloc[-1]) < float(signal_line.iloc[-1]))
-        ema_bull = (float(ema9.iloc[-2]) < float(ema21.iloc[-2])
-                    and float(ema9.iloc[-1]) > float(ema21.iloc[-1]))
-        ema_bear = (float(ema9.iloc[-2]) > float(ema21.iloc[-2])
-                    and float(ema9.iloc[-1]) < float(ema21.iloc[-1]))
+        # State-based: is MACD/EMA currently positioned bullish or bearish?
+        # (not requiring a fresh crossover — that fires too rarely)
+        macd_bull = float(macd_line.iloc[-1]) > float(signal_line.iloc[-1])
+        macd_bear = float(macd_line.iloc[-1]) < float(signal_line.iloc[-1])
+        ema_bull  = float(ema9.iloc[-1]) > float(ema21.iloc[-1])
+        ema_bear  = float(ema9.iloc[-1]) < float(ema21.iloc[-1])
 
         buy_hits = [rsi_now < 45, macd_bull, ema_bull]
         sell_hits = [rsi_now > 55, macd_bear, ema_bear]
@@ -203,14 +201,11 @@ def get_signal(symbol: str, df_1h: pd.DataFrame | None = None) -> tuple[dict | N
 
         has_vol_spike = _vol_spike(df)
 
-        macd_bull = (float(macd_line.iloc[-2]) < float(signal_line.iloc[-2])
-                     and float(macd_line.iloc[-1]) > float(signal_line.iloc[-1]))
-        macd_bear = (float(macd_line.iloc[-2]) > float(signal_line.iloc[-2])
-                     and float(macd_line.iloc[-1]) < float(signal_line.iloc[-1]))
-        ema_bull = (float(ema9.iloc[-2]) < float(ema21.iloc[-2])
-                    and float(ema9.iloc[-1]) > float(ema21.iloc[-1]))
-        ema_bear = (float(ema9.iloc[-2]) > float(ema21.iloc[-2])
-                    and float(ema9.iloc[-1]) < float(ema21.iloc[-1]))
+        # State-based: current position, not requiring a fresh crossover
+        macd_bull = float(macd_line.iloc[-1]) > float(signal_line.iloc[-1])
+        macd_bear = float(macd_line.iloc[-1]) < float(signal_line.iloc[-1])
+        ema_bull  = float(ema9.iloc[-1]) > float(ema21.iloc[-1])
+        ema_bear  = float(ema9.iloc[-1]) < float(ema21.iloc[-1])
 
         buy_hits = [rsi_now < 45, macd_bull, ema_bull]
         sell_hits = [rsi_now > 55, macd_bear, ema_bear]
@@ -225,9 +220,9 @@ def get_signal(symbol: str, df_1h: pd.DataFrame | None = None) -> tuple[dict | N
         if rsi_now < 45:
             reasons_buy.append(f"RSI oversold ({rsi_now:.1f})")
         if macd_bull:
-            reasons_buy.append("MACD bullish crossover")
+            reasons_buy.append("MACD above signal (bullish)")
         if ema_bull:
-            reasons_buy.append("EMA9 crossed above EMA21")
+            reasons_buy.append("EMA9 above EMA21 (bullish)")
         if has_vol_spike:
             reasons_buy.append("Volume spike (+50% above avg)")
 
@@ -235,9 +230,9 @@ def get_signal(symbol: str, df_1h: pd.DataFrame | None = None) -> tuple[dict | N
         if rsi_now > 55:
             reasons_sell.append(f"RSI overbought ({rsi_now:.1f})")
         if macd_bear:
-            reasons_sell.append("MACD bearish crossover")
+            reasons_sell.append("MACD below signal (bearish)")
         if ema_bear:
-            reasons_sell.append("EMA9 crossed below EMA21")
+            reasons_sell.append("EMA9 below EMA21 (bearish)")
         if has_vol_spike:
             reasons_sell.append("Volume spike (+50% above avg)")
 
