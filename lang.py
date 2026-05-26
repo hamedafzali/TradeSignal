@@ -210,6 +210,44 @@ _S: dict[str, dict[str, str]] = {
         "fa": "اشتراک `{symbol}` لغو شد.",
     },
 
+    # Close callback
+    "close_confirmed": {
+        "en": "{emoji} *{symbol}* closed\nEntry `${entry:.2f}` → Exit `${exit:.2f}`\nP&L: `{sign}{pnl:.2f}%`",
+        "fa": "{emoji} *{symbol}* بسته شد\nورود `${entry:.2f}` → خروج `${exit:.2f}`\nسود/زیان: `{sign}{pnl:.2f}٪`",
+    },
+    "close_not_found": {
+        "en": "No open position found for {symbol}.",
+        "fa": "معامله باز برای {symbol} پیدا نشد.",
+    },
+
+    # Stats command
+    "stats_header": {
+        "en": "📊 *Signal Performance*",
+        "fa": "📊 *عملکرد سیگنال‌ها*",
+    },
+    "stats_body": {
+        "en": "Subscribers: `{users}`\nTotal signals: `{total}`\nToday: `{today}`\nAccuracy: `{acc}`\n\nPer symbol:\n{sym_lines}",
+        "fa": "مشترکان: `{users}`\nکل سیگنال‌ها: `{total}`\nامروز: `{today}`\nدقت: `{acc}`\n\nبه تفکیک نماد:\n{sym_lines}",
+    },
+    "stats_accuracy": {
+        "en": "{pct}%  ({correct}/{resolved} resolved)",
+        "fa": "{pct}٪  ({correct}/{resolved} بررسی‌شده)",
+    },
+    "stats_no_data": {
+        "en": "N/A — no resolved signals yet",
+        "fa": "موجود نیست — هنوز سیگنالی بررسی نشده",
+    },
+
+    # test command DM preview
+    "test_channel_ok": {
+        "en": "✅ Test signal sent to `{channel}`\n\n📱 *Preview of your DM format (below):*",
+        "fa": "✅ سیگنال تست به `{channel}` ارسال شد\n\n📱 *پیش‌نمایش فرمت پیام شما (پایین):*",
+    },
+    "test_channel_fail": {
+        "en": "❌ Failed to post to channel `{channel}`\n\nError: `{error}`\n\nMake sure:\n1. Channel exists\n2. Bot is Admin\n3. Bot has 'Post Messages' permission",
+        "fa": "❌ ارسال به کانال `{channel}` ناموفق بود\n\nخطا: `{error}`\n\nبررسی کنید:\n۱. کانال وجود داشته باشد\n۲. ربات ادمین کانال باشد\n۳. ربات اجازه ارسال پیام داشته باشد",
+    },
+
     # Misc
     "scanning": {
         "en": "🔍 Scanning…",

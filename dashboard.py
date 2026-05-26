@@ -1,4 +1,7 @@
 import os
+import urllib.request
+import urllib.parse
+import json as _json
 from flask import Flask, jsonify, render_template_string, request
 from database import (
     init_db, get_stats, get_recent_signals,
@@ -185,9 +188,19 @@ _HTML = """<!DOCTYPE html>
             Changes take effect within 5 minutes — the bot refreshes this list automatically.
           </p>
 
-          <div class="d-flex gap-2 mb-3">
-            <input type="text" id="new-symbol" class="form-control" placeholder="e.g. GOOGL or SOL-USD" style="max-width:200px">
-            <button class="btn btn-add px-3" onclick="addSymbol()">+ Add</button>
+          <!-- Search input with autocomplete -->
+          <div class="position-relative mb-3" style="max-width:340px">
+            <div class="d-flex gap-2">
+              <input type="text" id="new-symbol" class="form-control"
+                placeholder="Search by name or ticker…"
+                autocomplete="off"
+                oninput="searchSymbol(this.value)"
+                onkeydown="if(event.key==='Enter'){addSymbol();event.preventDefault()}">
+              <button class="btn btn-add px-3" onclick="addSymbol()">+ Add</button>
+            </div>
+            <div id="search-dropdown" class="position-absolute w-100 mt-1"
+              style="z-index:1000;display:none;background:#1a1d27;border:1px solid #2a2d3a;
+                     border-radius:6px;max-height:220px;overflow-y:auto"></div>
           </div>
           <div id="add-msg" class="small mb-2" style="min-height:1.2em"></div>
 
@@ -419,6 +432,38 @@ async function refreshAdmin() {
   }).join('') || '<div style="color:#555">No signal data yet.</div>';
 }
 
+let _searchTimer = null;
+function searchSymbol(q) {
+  clearTimeout(_searchTimer);
+  const dd = document.getElementById('search-dropdown');
+  if (!q || q.length < 1) { dd.style.display='none'; return; }
+  _searchTimer = setTimeout(async () => {
+    const res = await fetch('/api/search?q='+encodeURIComponent(q)).then(r=>r.json());
+    if (!res.length) { dd.style.display='none'; return; }
+    dd.innerHTML = res.map(item => `
+      <div class="d-flex align-items-center gap-2 px-3 py-2 search-row"
+        style="cursor:pointer;border-bottom:1px solid #2a2d3a"
+        onmouseover="this.style.background='#0f1117'"
+        onmouseout="this.style.background=''"
+        onclick="selectSymbol('${item.symbol}')">
+        <span class="sym-tag" style="min-width:70px">${item.symbol}</span>
+        <span style="color:#e0e0e0;font-size:.82rem">${item.name}</span>
+        <span class="ms-auto" style="color:#555;font-size:.72rem">${item.exchange} · ${item.type}</span>
+      </div>`).join('');
+    dd.style.display='block';
+  }, 300);
+}
+
+function selectSymbol(sym) {
+  document.getElementById('new-symbol').value = sym;
+  document.getElementById('search-dropdown').style.display='none';
+}
+
+document.addEventListener('click', e => {
+  if (!e.target.closest('#new-symbol') && !e.target.closest('#search-dropdown'))
+    document.getElementById('search-dropdown').style.display = 'none';
+});
+
 async function addSymbol() {
   const inp = document.getElementById('new-symbol');
   const sym = inp.value.trim().toUpperCase();
@@ -488,6 +533,36 @@ def api_signals():
 @app.route("/api/ml-stats")
 def api_ml_stats():
     return jsonify(get_ml_accuracy_stats())
+
+
+@app.route("/api/search")
+def api_search():
+    q = request.args.get("q", "").strip()
+    if not q:
+        return jsonify([])
+    try:
+        url = (
+            "https://query1.finance.yahoo.com/v1/finance/search"
+            f"?q={urllib.parse.quote(q)}&quotesCount=10&newsCount=0"
+            "&enableFuzzyQuery=false&quotesQueryId=tss_match_phrase_query"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = _json.loads(resp.read())
+        results = []
+        for item in data.get("quotes", []):
+            symbol = item.get("symbol", "")
+            if not symbol:
+                continue
+            results.append({
+                "symbol": symbol,
+                "name": item.get("shortname") or item.get("longname") or symbol,
+                "exchange": item.get("exchDisp") or item.get("exchange") or "—",
+                "type": item.get("typeDisp") or "Equity",
+            })
+        return jsonify(results)
+    except Exception as e:
+        return jsonify([])
 
 
 @app.route("/api/symbols", methods=["GET"])

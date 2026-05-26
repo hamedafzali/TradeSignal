@@ -460,6 +460,8 @@ async def close_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.answer()
     user_id = str(query.from_user.id)
     _, symbol = query.data.split(":", 1)
+    pref = get_user_pref(user_id)
+    lang = pref["lang"]
 
     df = yf.download(symbol, period="1d", interval="5m", progress=False, auto_adjust=True)
     exit_price = float(df["Close"].squeeze().iloc[-1]) if not df.empty else 0.0
@@ -467,16 +469,16 @@ async def close_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.edit_message_reply_markup(reply_markup=None)
 
     if result:
-        sign = "+" if result["pnl_pct"] >= 0 else ""
-        emoji = "🟢" if result["pnl_pct"] >= 0 else "🔴"
+        pnl = result["pnl_pct"]
+        sign = "+" if pnl >= 0 else ""
+        emoji = "🟢" if pnl >= 0 else "🔴"
         await query.message.reply_text(
-            f"{emoji} *{symbol} position closed*\n"
-            f"Entry `${result['entry']:.2f}` → Exit `${result['exit']:.2f}`\n"
-            f"P&L: `{sign}{result['pnl_pct']:.2f}%`",
+            t("close_confirmed", lang=lang, emoji=emoji, symbol=symbol,
+              entry=result["entry"], exit=result["exit"], sign=sign, pnl=pnl),
             parse_mode="Markdown",
         )
     else:
-        await query.message.reply_text(f"No open position found for {symbol}.")
+        await query.message.reply_text(t("close_not_found", lang=lang, symbol=symbol))
 
 
 # ── Menus ─────────────────────────────────────────────────────────────────────
@@ -850,10 +852,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    log_user(update.effective_user.id, update.effective_user.username or "")
-    positions = get_user_open_positions(str(update.effective_user.id))
+    uid = update.effective_user.id
+    log_user(uid, update.effective_user.username or "")
+    pref = get_user_pref(uid)
+    lang = pref["lang"]
+    positions = get_user_open_positions(str(uid))
     if not positions:
-        await update.message.reply_text("You have no open positions.")
+        await update.message.reply_text(t("status_no_positions", lang=lang))
         return
 
     lines = []
@@ -866,38 +871,49 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         pct = (current - p["entry_price"]) / p["entry_price"] * 100
         sign = "+" if pct >= 0 else ""
         emoji = "🟢" if pct >= 0 else "🔴"
-        tp_line = f"\n   TP: `${p['tp']:.2f}`  SL: `${p['sl']:.2f}`" if p.get("tp") and p.get("sl") else ""
-        lines.append(
-            f"{emoji} *{p['symbol']}*\n"
-            f"   Entry: `${p['entry_price']:.2f}` → Now: `${current:.2f}`\n"
-            f"   P&L: `{sign}{pct:.2f}%`{tp_line}"
-        )
-    await update.message.reply_text("*Your open positions:*\n\n" + "\n\n".join(lines), parse_mode="Markdown")
+        if lang == "fa":
+            tp_line = f"\n   هدف: `${p['tp']:.2f}`  حد ضرر: `${p['sl']:.2f}`" if p.get("tp") and p.get("sl") else ""
+            lines.append(
+                f"{emoji} *{p['symbol']}*\n"
+                f"   ورود: `${p['entry_price']:.2f}` ← اکنون: `${current:.2f}`\n"
+                f"   سود/زیان: `{sign}{pct:.2f}٪`{tp_line}"
+            )
+        else:
+            tp_line = f"\n   TP: `${p['tp']:.2f}`  SL: `${p['sl']:.2f}`" if p.get("tp") and p.get("sl") else ""
+            lines.append(
+                f"{emoji} *{p['symbol']}*\n"
+                f"   Entry: `${p['entry_price']:.2f}` → Now: `${current:.2f}`\n"
+                f"   P&L: `{sign}{pct:.2f}%`{tp_line}"
+            )
+    header = t("status_header", lang=lang)
+    await update.message.reply_text(f"{header}\n\n" + "\n\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    log_user(update.effective_user.id, update.effective_user.username or "")
-    history = get_user_pnl(str(update.effective_user.id))
+    uid = update.effective_user.id
+    log_user(uid, update.effective_user.username or "")
+    pref = get_user_pref(uid)
+    lang = pref["lang"]
+    history = get_user_pnl(str(uid))
     if not history:
-        await update.message.reply_text("No closed trades yet.\n\nTrack a BUY signal from the channel to get started.")
+        await update.message.reply_text(t("pnl_empty", lang=lang))
         return
 
-    total = sum(t["pnl_pct"] for t in history)
-    wins = sum(1 for t in history if t["pnl_pct"] > 0)
+    total = sum(tr["pnl_pct"] for tr in history)
+    wins = sum(1 for tr in history if tr["pnl_pct"] > 0)
     avg = total / len(history)
     sign = "+" if avg >= 0 else ""
     lines = []
-    for t in history:
-        s = "+" if t["pnl_pct"] >= 0 else ""
-        e = "🟢" if t["pnl_pct"] >= 0 else "🔴"
-        lines.append(f"{e} *{t['symbol']}* `{s}{t['pnl_pct']:.2f}%`  —  `${t['entry_price']:.2f}` → `${t['exit_price']:.2f}`")
-
-    await update.message.reply_text(
-        f"📊 *Your Trade History*\n"
-        f"{len(history)} trades  ·  {wins} wins  ·  Avg `{sign}{avg:.2f}%`\n\n"
-        + "\n".join(lines),
-        parse_mode="Markdown",
-    )
+    for tr in history:
+        s = "+" if tr["pnl_pct"] >= 0 else ""
+        e = "🟢" if tr["pnl_pct"] >= 0 else "🔴"
+        pnl_unit = "٪" if lang == "fa" else "%"
+        lines.append(
+            f"{e} *{tr['symbol']}* `{s}{tr['pnl_pct']:.2f}{pnl_unit}`  —  "
+            f"`${tr['entry_price']:.2f}` → `${tr['exit_price']:.2f}`"
+        )
+    header = t("pnl_header", lang=lang, n=len(history), wins=wins, sign=sign, avg=avg)
+    await update.message.reply_text(header + "\n\n" + "\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -925,79 +941,82 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    log_user(update.effective_user.id, update.effective_user.username or "")
+    uid = update.effective_user.id
+    log_user(uid, update.effective_user.username or "")
+    pref = get_user_pref(uid)
+    lang = pref["lang"]
     s = get_stats()
-    acc = f"{s['accuracy']}%  ({s['correct']}/{s['resolved']} resolved)" if s["resolved"] > 0 else "N/A — no resolved signals yet"
+    if s["resolved"] > 0:
+        acc = t("stats_accuracy", lang=lang, pct=s["accuracy"],
+                correct=s["correct"], resolved=s["resolved"])
+    else:
+        acc = t("stats_no_data", lang=lang)
+    pct_label = "٪" if lang == "fa" else "%"
     sym_lines = "\n".join(
-        f"  {sym}: {v['total']} signals  ·  {v['accuracy']}% accuracy"
+        f"  {sym}: {v['total']}  ·  {v['accuracy']}{pct_label}"
         for sym, v in s["per_symbol"].items()
-    ) or "  No signals yet"
-
+    ) or ("  هنوز سیگنالی نیست" if lang == "fa" else "  No signals yet")
+    body = t("stats_body", lang=lang, users=s["total_users"], total=s["total_signals"],
+             today=s["today_signals"], acc=acc, sym_lines=sym_lines)
     await update.message.reply_text(
-        f"📊 *Signal Performance*\n\n"
-        f"Subscribers: `{s['total_users']}`\n"
-        f"Total signals: `{s['total_signals']}`\n"
-        f"Today: `{s['today_signals']}`\n"
-        f"Accuracy: `{acc}`\n\n"
-        f"Per symbol:\n{sym_lines}",
-        parse_mode="Markdown",
+        t("stats_header", lang=lang) + "\n\n" + body, parse_mode="Markdown"
     )
 
 
 async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Subscribe to DM alerts for specific symbols, or show current subscriptions."""
     user = update.effective_user
     log_user(user.id, user.username or "")
     user_id = str(user.id)
+    pref = get_user_pref(user_id)
+    lang = pref["lang"]
+    active = _get_symbols()
+    all_fmt = ", ".join(f"`{s}`" for s in active)
 
     if not context.args:
         subs = get_user_subscriptions(user_id)
-        all_symbols = ", ".join(f"`{s}`" for s in SYMBOLS)
         if subs:
-            current = ", ".join(f"`{s}`" for s in subs)
             await update.message.reply_text(
-                f"📬 *Your subscriptions:* {current}\n\n"
-                f"To add: /subscribe AAPL BTC-USD\n"
-                f"To remove all: /unsubscribe\n\n"
-                f"Available: {all_symbols}",
+                t("subscribe_current", lang=lang,
+                  subs=", ".join(f"`{s}`" for s in subs), all=all_fmt),
                 parse_mode="Markdown",
             )
         else:
             await update.message.reply_text(
-                f"You have no subscriptions.\n\n"
-                f"Subscribe to get DM alerts when a signal fires:\n"
-                f"/subscribe AAPL TSLA BTC-USD\n\n"
-                f"Available: {all_symbols}",
+                t("subscribe_prompt", lang=lang, all=all_fmt),
                 parse_mode="Markdown",
             )
         return
 
     requested = [s.strip().upper() for s in context.args]
-    valid = [s for s in requested if s in [sym.upper() for sym in SYMBOLS]]
+    valid = [s for s in requested if s in [sym.upper() for sym in active]]
     invalid = [s for s in requested if s not in valid]
-
     if valid:
         subscribe_user(user_id, valid)
         added = ", ".join(f"`{s}`" for s in valid)
-        msg = f"✅ Subscribed to: {added}\n\nYou'll get DM alerts when signals fire for these symbols."
+        msg = t("subscribe_added", lang=lang, added=added)
         if invalid:
-            msg += f"\n\n⚠️ Not found: {', '.join(invalid)}. Available: {', '.join(SYMBOLS)}"
+            warn = (f"\n\n⚠️ یافت نشد: {', '.join(invalid)}" if lang == "fa"
+                    else f"\n\n⚠️ Not found: {', '.join(invalid)}")
+            msg += warn
         await update.message.reply_text(msg, parse_mode="Markdown")
     else:
-        await update.message.reply_text(
-            f"❌ None of those symbols are tracked.\n\nAvailable: {', '.join(SYMBOLS)}"
-        )
+        not_found = ("❌ هیچ‌کدام از نمادها یافت نشد.\n\nموجود: " if lang == "fa"
+                     else "❌ None of those symbols are tracked.\n\nAvailable: ")
+        await update.message.reply_text(not_found + all_fmt, parse_mode="Markdown")
 
 
 async def cmd_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = str(update.effective_user.id)
+    pref = get_user_pref(user_id)
+    lang = pref["lang"]
     if context.args:
         sym = context.args[0].upper()
         unsubscribe_user(user_id, sym)
-        await update.message.reply_text(f"Unsubscribed from `{sym}`.", parse_mode="Markdown")
+        await update.message.reply_text(t("unsubscribed_sym", lang=lang, symbol=sym),
+                                        parse_mode="Markdown")
     else:
         unsubscribe_user(user_id)
-        await update.message.reply_text("Unsubscribed from all symbols.")
+        await update.message.reply_text(t("unsubscribed", lang=lang))
 
 
 async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1087,9 +1106,9 @@ async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if str(update.effective_user.id) != ADMIN_CHAT_ID:
         return
 
-    if not CHANNEL_ID:
-        await update.message.reply_text("❌ CHANNEL_ID is not set in .env")
-        return
+    uid = update.effective_user.id
+    pref = get_user_pref(uid)
+    lang = pref["lang"]
 
     sample_sig = {
         "symbol": "AAPL", "action": "BUY", "price": 192.50,
@@ -1100,13 +1119,30 @@ async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "reasons": ["RSI oversold (38.2)", "MACD bullish crossover", "Volume spike (+50% above avg)",
                     "Multi-timeframe confirmed (1h+5m)"],
     }
+
+    if not CHANNEL_ID:
+        # No channel — just show personal preview
+        await update.message.reply_text(
+            signal_msg(sample_sig, lang=lang, mode=pref["mode"]),
+            parse_mode="Markdown",
+        )
+        return
+
     try:
         await _broadcast_signal(context.bot, sample_sig, session="open")
-        await update.message.reply_text(f"✅ Test signal sent to `{CHANNEL_ID}`", parse_mode="Markdown")
+        # Send confirmation + personal DM preview
+        await update.message.reply_text(
+            t("test_channel_ok", lang=lang, channel=CHANNEL_ID),
+            parse_mode="Markdown",
+        )
+        # Personal preview — shows how DM signals look with their language/mode
+        await update.message.reply_text(
+            signal_msg(sample_sig, lang=lang, mode=pref["mode"]),
+            parse_mode="Markdown",
+        )
     except Exception as e:
         await update.message.reply_text(
-            f"❌ Failed to post to channel `{CHANNEL_ID}`\n\nError: `{e}`\n\n"
-            "Make sure:\n1. The channel exists\n2. The bot is added as Admin\n3. Bot has 'Post Messages' permission",
+            t("test_channel_fail", lang=lang, channel=CHANNEL_ID, error=str(e)),
             parse_mode="Markdown",
         )
 
