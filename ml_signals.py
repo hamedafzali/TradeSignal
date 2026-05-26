@@ -14,7 +14,8 @@ logger = logging.getLogger(__name__)
 CACHE_DIR = os.path.join(os.path.dirname(__file__), ".model_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-RETRAIN_EVERY = 86400  # 24 hours
+RETRAIN_EVERY = 21600          # 6-hour fallback
+RETRAIN_OUTCOME_THRESHOLD = 3  # retrain after this many new outcomes since last train
 
 
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -89,6 +90,7 @@ class StockModel:
         self.trained_at = 0.0
         self.train_samples = 0
         self.outcome_samples = 0
+        self.outcome_count_at_train = 0  # resolved outcome count when last trained
         self._path = os.path.join(CACHE_DIR, f"{symbol}.pkl")
         self._load()
 
@@ -108,8 +110,13 @@ class StockModel:
         with open(self._path, "wb") as f:
             pickle.dump(data, f)
 
-    def needs_retrain(self) -> bool:
-        return not self.trained or (time.time() - self.trained_at) > RETRAIN_EVERY
+    def needs_retrain(self, current_outcome_count: int = 0) -> bool:
+        if not self.trained:
+            return True
+        new_outcomes = current_outcome_count - self.outcome_count_at_train
+        if new_outcomes >= RETRAIN_OUTCOME_THRESHOLD:
+            return True
+        return (time.time() - self.trained_at) > RETRAIN_EVERY
 
     def train(self, outcome_data: list[dict] | None = None) -> bool:
         """
@@ -154,6 +161,13 @@ class StockModel:
             self.trained_at = time.time()
             self.train_samples = len(X)
             self.outcome_samples = len(outcome_data) if outcome_data else 0
+            # Snapshot current resolved outcome count so needs_retrain() can
+            # detect new outcomes arriving after this train run
+            try:
+                from database import get_outcome_count
+                self.outcome_count_at_train = get_outcome_count(self.symbol)
+            except Exception:
+                self.outcome_count_at_train = self.outcome_samples
             self._save()
 
             # Persist to DB for dashboard reporting

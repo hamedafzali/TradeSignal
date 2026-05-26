@@ -164,6 +164,32 @@ def get_pending_outcomes(older_than_hours: int = 24) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def get_pending_outcomes_recent(min_age_hours: float = 1.0) -> list[dict]:
+    """Pending signals old enough to have a meaningful outcome (TP or SL reached)."""
+    cutoff = (datetime.utcnow() - timedelta(hours=min_age_hours)).isoformat()
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM signals WHERE outcome = 'pending' AND sent_at <= ? AND tp IS NOT NULL AND sl IS NOT NULL",
+            (cutoff,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_outcome_count(symbol: str | None = None) -> int:
+    """Count of resolved (non-pending) outcomes, optionally filtered by symbol."""
+    with _conn() as conn:
+        if symbol:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM signals WHERE outcome != 'pending' AND symbol = ?",
+                (symbol,)
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM signals WHERE outcome != 'pending'"
+            ).fetchone()
+        return row[0]
+
+
 def update_outcome(signal_id: int, outcome: str, outcome_price: float) -> None:
     with _conn() as conn:
         conn.execute("""
@@ -172,12 +198,19 @@ def update_outcome(signal_id: int, outcome: str, outcome_price: float) -> None:
         """, (outcome, outcome_price, datetime.utcnow().isoformat(), signal_id))
 
 
-def get_outcome_training_data() -> list[dict]:
+def get_outcome_training_data(symbol: str | None = None) -> list[dict]:
     with _conn() as conn:
-        rows = conn.execute("""
-            SELECT features, action, outcome FROM signals
-            WHERE outcome IN ('correct', 'incorrect') AND features IS NOT NULL
-        """).fetchall()
+        if symbol:
+            rows = conn.execute("""
+                SELECT features, action, outcome FROM signals
+                WHERE outcome IN ('correct', 'incorrect') AND features IS NOT NULL
+                AND symbol = ?
+            """, (symbol,)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT features, action, outcome FROM signals
+                WHERE outcome IN ('correct', 'incorrect') AND features IS NOT NULL
+            """).fetchall()
     result = []
     for r in rows:
         feats = json.loads(r["features"] or "{}")

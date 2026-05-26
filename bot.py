@@ -29,8 +29,10 @@ from database import (
     get_all_open_positions,
     get_all_subscriber_ids,
     get_last_signal_action,
+    get_outcome_count,
     get_outcome_training_data,
     get_pending_outcomes,
+    get_pending_outcomes_recent,
     get_stats,
     get_subscribers_for_symbol,
     get_user_open_positions,
@@ -125,7 +127,16 @@ async def _ensure_models_trained(bot=None) -> None:
 # ── Outcome checker ───────────────────────────────────────────────────────────
 
 async def check_outcomes(context: ContextTypes.DEFAULT_TYPE) -> None:
-    pending = get_pending_outcomes(older_than_hours=OUTCOME_CHECK_HOURS)
+    # Combine long-window (configured hours) and short-window (1h+) signals
+    long_window = get_pending_outcomes(older_than_hours=OUTCOME_CHECK_HOURS)
+    recent = get_pending_outcomes_recent(min_age_hours=1.0)
+    # Deduplicate by id
+    seen = set()
+    pending = []
+    for sig in long_window + recent:
+        if sig["id"] not in seen:
+            seen.add(sig["id"])
+            pending.append(sig)
     if not pending:
         return
     logger.info(f"Checking outcomes for {len(pending)} signals...")
@@ -178,6 +189,48 @@ async def check_outcomes(context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
         except Exception as e:
             logger.error(f"Outcome check error signal {sig['id']}: {e}")
+
+
+# ── Continuous learning ───────────────────────────────────────────────────────
+
+async def continuous_learning(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Runs every 20 min. For each active symbol, checks whether new resolved
+    outcomes have accumulated since the last training run. If so, retrains
+    immediately rather than waiting for the 6-hour fallback timer.
+    """
+    symbols = _get_symbols()
+    retrained = []
+    for symbol in symbols:
+        model = models.get(symbol)
+        if model is None:
+            continue
+        try:
+            current_count = get_outcome_count(symbol)
+            if not model.needs_retrain(current_outcome_count=current_count):
+                continue
+
+            outcome_data = get_outcome_training_data(symbol=symbol)
+            ok = model.train(outcome_data or None)
+            if ok:
+                retrained.append(symbol)
+                logger.info(
+                    f"[ML] Retrained {symbol} — outcomes since last train: "
+                    f"{current_count - model.outcome_count_at_train}"
+                )
+        except Exception as e:
+            logger.error(f"[ML] continuous_learning error for {symbol}: {e}")
+
+    if retrained and ADMIN_CHAT_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"🧠 *ML auto-retrain* — {', '.join(retrained)}\n"
+                     f"_(triggered by new outcomes)_",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
 
 
 # ── Live TP/SL monitor ────────────────────────────────────────────────────────
@@ -1229,8 +1282,10 @@ def main() -> None:
     app.job_queue.run_repeating(refresh_symbols, interval=300, first=30)
     # Scan every SCAN_INTERVAL seconds
     app.job_queue.run_repeating(scan_and_alert, interval=SCAN_INTERVAL, first=10)
-    # Check pending outcomes every hour
-    app.job_queue.run_repeating(check_outcomes, interval=3600, first=300)
+    # Check pending outcomes every 30 minutes (also catches 1h-old recent signals)
+    app.job_queue.run_repeating(check_outcomes, interval=1800, first=300)
+    # Continuous learning: retrain any symbol with new outcomes every 20 minutes
+    app.job_queue.run_repeating(continuous_learning, interval=1200, first=120)
     # Monitor open positions for TP/SL every 5 minutes
     app.job_queue.run_repeating(monitor_positions, interval=300, first=60)
     # Weekly recap: every Monday at 9:00 UTC
