@@ -520,22 +520,6 @@ _HTML = """<!DOCTYPE html>
             </div>
 
             <div class="col-md-4">
-              <label class="small text-muted">Channel Language</label>
-              <select id="set-channel_lang" class="form-control mt-1">
-                <option value="fa">🇮🇷 فارسی (Persian)</option>
-                <option value="en">🇬🇧 English</option>
-              </select>
-            </div>
-
-            <div class="col-md-4">
-              <label class="small text-muted">Channel Signal Style</label>
-              <select id="set-channel_mode" class="form-control mt-1">
-                <option value="beginner">Beginner (simple explanation)</option>
-                <option value="expert">Expert (indicators & data)</option>
-              </select>
-            </div>
-
-            <div class="col-md-4">
               <label class="small text-muted">Outcome Notifications in DM</label>
               <select id="set-outcome_notify_admin" class="form-control mt-1">
                 <option value="false">Disabled (no DM for outcomes)</option>
@@ -889,7 +873,7 @@ async function loadSettings() {
   const s = await fetch('/api/settings').then(r => r.json());
   const keys = ['sentiment_provider','news_provider','sentiment_suppress_threshold',
                  'finnhub_api_key','gemini_api_key','claude_api_key','sentiment_local_url','news_lookback_hours',
-                 'channel_lang','channel_mode','outcome_notify_admin'];
+                 'outcome_notify_admin'];
   for (const k of keys) {
     const el = document.getElementById('set-' + k);
     if (el && s[k] !== undefined) el.value = s[k];
@@ -916,7 +900,7 @@ async function saveSettings() {
   msg.textContent = 'Saving…';
   const keys = ['sentiment_provider','news_provider','sentiment_suppress_threshold',
                  'finnhub_api_key','gemini_api_key','claude_api_key','sentiment_local_url','news_lookback_hours',
-                 'channel_lang','channel_mode','outcome_notify_admin'];
+                 'outcome_notify_admin'];
   const payload = {};
   for (const k of keys) {
     const el = document.getElementById('set-' + k);
@@ -1545,7 +1529,7 @@ def api_settings_post():
     allowed_keys = {
         "sentiment_provider", "sentiment_local_url", "claude_api_key", "gemini_api_key",
         "sentiment_suppress_threshold", "news_provider", "finnhub_api_key",
-        "channel_lang", "channel_mode", "outcome_notify_admin",
+        "outcome_notify_admin",
         "news_lookback_hours",
     }
     for key, value in data.items():

@@ -699,10 +699,10 @@ def _channel_message(sig: dict, session: str) -> str:
 async def _broadcast_signal(bot, sig: dict, session: str = "open") -> None:
     if not CHANNEL_ID:
         return
-    ch_lang = get_setting("channel_lang", "fa")
-    ch_mode = get_setting("channel_mode", "beginner")
+    admin_pref = get_user_pref(ADMIN_CHAT_ID) if ADMIN_CHAT_ID else {}
+    ch_lang = admin_pref.get("lang", "en")
+    ch_mode = admin_pref.get("mode", "beginner")
     body = signal_msg(sig, lang=ch_lang, mode=ch_mode)
-    # Append timestamp footer
     et_time = datetime.now(ET).strftime("%H:%M ET")
     session_label = "  ·  🌅 پیش‌بازار" if (session == "pre" and ch_lang == "fa") else ("  ·  🌅 Pre-market" if session == "pre" else "")
     body += f"\n━━━━━━━━━━━━━━━━━━━\n⏱ `{et_time}`{session_label}  ·  #{sig['symbol']}"
