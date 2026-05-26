@@ -4,6 +4,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 import yfinance as yf
 from dotenv import load_dotenv
 from telegram import (
@@ -149,6 +150,9 @@ def _resolve_signal_outcome(sig: dict) -> dict | None:
     )
     if df.empty:
         return None
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.droplevel(1)
 
     if df.index.tz is None:
         df.index = df.index.tz_localize("UTC")
