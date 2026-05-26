@@ -428,6 +428,24 @@ _HTML = """<!DOCTYPE html>
   <div class="tab-pane fade" id="tab-admin">
 
     <div class="row g-3 mb-4">
+      <div class="col-12">
+        <div class="card p-3" style="border-color:#a78bfa40">
+          <h6 class="mb-3">🚀 ML Bootstrap — Pre-train from 2 Years of Historical Data</h6>
+          <p class="small mb-3" style="color:#8b8fa8">
+            Runs the signal engine on 2 years of hourly bars per symbol, labels each signal
+            as correct/incorrect from TP/SL outcomes, and trains the ML models.
+            Takes ~5–10 minutes. Progress is visible in the 🔄 Learning Activity tab.
+          </p>
+          <div class="d-flex gap-3 align-items-center flex-wrap">
+            <button class="btn" style="background:#2a1a4a;color:#a78bfa;border:1px solid #a78bfa40;padding:8px 24px;font-size:.9rem"
+              onclick="adminBootstrap()">🚀 Run Bootstrap (All Symbols)</button>
+            <div id="bootstrap-msg" class="small" style="color:#8b8fa8"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row g-3 mb-4">
       <div class="col-md-6">
         <div class="card p-3">
           <h6 class="mb-3">⚙️ Watched Symbols</h6>
@@ -751,6 +769,25 @@ async function refreshML() {
 }
 
 // ── Admin ─────────────────────────────────────────────────────────────────────
+async function adminBootstrap() {
+  const msg = document.getElementById('bootstrap-msg');
+  msg.style.color = '#8b8fa8';
+  msg.textContent = 'Queueing bootstrap…';
+  const res = await fetch('/api/actions', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'run_bootstrap'}),
+  }).then(r => r.json());
+  if (res.ok) {
+    msg.style.color = '#a78bfa';
+    msg.textContent = '✓ Bootstrap started — switch to 🔄 Learning Activity to watch progress';
+    setTimeout(refreshJobs, 4000);
+  } else {
+    msg.style.color = '#f87171';
+    msg.textContent = res.error || 'Failed to start bootstrap';
+  }
+}
+
 async function refreshAdmin() {
   const [syms, stats] = await Promise.all([
     fetch('/api/symbols').then(r=>r.json()),
