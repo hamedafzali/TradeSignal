@@ -5,12 +5,20 @@ from zoneinfo import ZoneInfo
 
 import yfinance as yf
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 from backtest import format_backtest_message, run_backtest
@@ -484,6 +492,293 @@ async def close_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.message.reply_text(f"No open position found for {symbol}.")
 
 
+# ── Menus ─────────────────────────────────────────────────────────────────────
+
+def _reply_keyboard() -> ReplyKeyboardMarkup:
+    """Persistent button bar shown at the bottom of the chat."""
+    rows = [
+        ["📊 Positions", "📈 P&L History"],
+        ["🔍 Scan Market", "📉 Stats"],
+        ["📬 Subscriptions", "🧪 Backtest"],
+        ["📋 Menu"],
+    ]
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, input_field_placeholder="Choose an action…")
+
+
+def _main_menu_inline() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📊 Positions", callback_data="menu:status"),
+            InlineKeyboardButton("📈 P&L History", callback_data="menu:pnl"),
+        ],
+        [
+            InlineKeyboardButton("🔍 Scan Market", callback_data="menu:scan"),
+            InlineKeyboardButton("📉 Stats", callback_data="menu:stats"),
+        ],
+        [
+            InlineKeyboardButton("📬 Subscriptions", callback_data="menu:subscribe"),
+            InlineKeyboardButton("🧪 Backtest", callback_data="menu:backtest_prompt"),
+        ],
+        [
+            InlineKeyboardButton("❓ Help", callback_data="menu:help"),
+        ],
+    ])
+
+
+async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    log_user(update.effective_user.id, update.effective_user.username or "")
+    await update.message.reply_text(
+        "📋 *Main Menu* — choose an action:",
+        parse_mode="Markdown",
+        reply_markup=_main_menu_inline(),
+    )
+
+
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    action = query.data.split(":", 1)[1]
+
+    if action == "status":
+        await query.message.reply_text("Loading positions…")
+        await cmd_status.__wrapped__(update, context) if hasattr(cmd_status, "__wrapped__") else None
+        positions = get_user_open_positions(str(query.from_user.id))
+        if not positions:
+            await query.message.reply_text("You have no open positions.")
+            return
+        lines = []
+        for p in positions:
+            try:
+                df = yf.download(p["symbol"], period="1d", interval="5m", progress=False, auto_adjust=True)
+                current = float(df["Close"].squeeze().iloc[-1]) if not df.empty else p["entry_price"]
+            except Exception:
+                current = p["entry_price"]
+            pct = (current - p["entry_price"]) / p["entry_price"] * 100
+            sign = "+" if pct >= 0 else ""
+            emoji = "🟢" if pct >= 0 else "🔴"
+            tp_line = f"\n   TP: `${p['tp']:.2f}`  SL: `${p['sl']:.2f}`" if p.get("tp") and p.get("sl") else ""
+            lines.append(
+                f"{emoji} *{p['symbol']}*\n"
+                f"   Entry: `${p['entry_price']:.2f}` → Now: `${current:.2f}`\n"
+                f"   P&L: `{sign}{pct:.2f}%`{tp_line}"
+            )
+        await query.message.reply_text(
+            "*Your open positions:*\n\n" + "\n\n".join(lines),
+            parse_mode="Markdown",
+        )
+
+    elif action == "pnl":
+        history = get_user_pnl(str(query.from_user.id))
+        if not history:
+            await query.message.reply_text(
+                "No closed trades yet.\n\nTrack a BUY signal from the channel to get started."
+            )
+            return
+        total = sum(t["pnl_pct"] for t in history)
+        wins = sum(1 for t in history if t["pnl_pct"] > 0)
+        avg = total / len(history)
+        sign = "+" if avg >= 0 else ""
+        lines = []
+        for t in history:
+            s = "+" if t["pnl_pct"] >= 0 else ""
+            e = "🟢" if t["pnl_pct"] >= 0 else "🔴"
+            lines.append(
+                f"{e} *{t['symbol']}* `{s}{t['pnl_pct']:.2f}%`  —  "
+                f"`${t['entry_price']:.2f}` → `${t['exit_price']:.2f}`"
+            )
+        await query.message.reply_text(
+            f"📊 *Your Trade History*\n"
+            f"{len(history)} trades  ·  {wins} wins  ·  Avg `{sign}{avg:.2f}%`\n\n"
+            + "\n".join(lines),
+            parse_mode="Markdown",
+        )
+
+    elif action == "scan":
+        await query.message.reply_text("🔍 Scanning all symbols…")
+        session = market_session()
+        session_labels = {
+            "open": "🟢 Market open", "pre": "🌅 Pre-market",
+            "after": "🌙 After-hours", "closed": "⛔ Market closed",
+        }
+        lines = []
+        for symbol in SYMBOLS:
+            try:
+                interval = "1h" if is_crypto(symbol) else "5m"
+                period = "30d" if is_crypto(symbol) else "5d"
+                df = yf.download(symbol, period=period, interval=interval, progress=False, auto_adjust=True)
+                if df.empty or len(df) < 50:
+                    lines.append(f"*{symbol}*: no data")
+                    continue
+                close = df["Close"].squeeze()
+                rsi_val = float(_rsi(close).iloc[-1])
+                macd_line, sig_line = _macd(close)
+                ema9 = close.ewm(span=9, adjust=False).mean()
+                ema21 = close.ewm(span=21, adjust=False).mean()
+                price = float(close.iloc[-1])
+                macd_dir = "↑" if float(macd_line.iloc[-1]) > float(sig_line.iloc[-1]) else "↓"
+                ema_dir = "↑" if float(ema9.iloc[-1]) > float(ema21.iloc[-1]) else "↓"
+                rsi_label = "🔴 OB" if rsi_val > 60 else ("🟢 OS" if rsi_val < 40 else "")
+                crypto_tag = " ₿" if is_crypto(symbol) else ""
+                lines.append(
+                    f"*{symbol}*{crypto_tag}  `${price:.2f}`\n"
+                    f"  RSI `{rsi_val:.0f}` {rsi_label}  ·  MACD {macd_dir}  ·  EMA {ema_dir}"
+                )
+            except Exception as e:
+                lines.append(f"*{symbol}*: error — {e}")
+        await query.message.reply_text(
+            f"{session_labels.get(session, '')}\n\n" + "\n\n".join(lines),
+            parse_mode="Markdown",
+        )
+
+    elif action == "stats":
+        s = get_stats()
+        acc = (f"{s['accuracy']}%  ({s['correct']}/{s['resolved']} resolved)"
+               if s["resolved"] > 0 else "N/A — no resolved signals yet")
+        sym_lines = "\n".join(
+            f"  {sym}: {v['total']} signals  ·  {v['accuracy']}% accuracy"
+            for sym, v in s["per_symbol"].items()
+        ) or "  No signals yet"
+        await query.message.reply_text(
+            f"📊 *Signal Performance*\n\n"
+            f"Subscribers: `{s['total_users']}`\n"
+            f"Total signals: `{s['total_signals']}`\n"
+            f"Today: `{s['today_signals']}`\n"
+            f"Accuracy: `{acc}`\n\n"
+            f"Per symbol:\n{sym_lines}",
+            parse_mode="Markdown",
+        )
+
+    elif action == "subscribe":
+        subs = get_user_subscriptions(str(query.from_user.id))
+        all_symbols = ", ".join(f"`{s}`" for s in SYMBOLS)
+        if subs:
+            current = ", ".join(f"`{s}`" for s in subs)
+            await query.message.reply_text(
+                f"📬 *Your subscriptions:* {current}\n\n"
+                f"To add more: /subscribe AAPL BTC-USD\n"
+                f"To remove all: /unsubscribe\n\n"
+                f"Available: {all_symbols}",
+                parse_mode="Markdown",
+            )
+        else:
+            # Show subscribe buttons for each symbol
+            buttons = [
+                InlineKeyboardButton(sym, callback_data=f"sub:{sym}")
+                for sym in SYMBOLS
+            ]
+            rows = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
+            await query.message.reply_text(
+                f"📬 *Subscribe to signal alerts*\n\nTap symbols to subscribe:",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+
+    elif action == "backtest_prompt":
+        buttons = [
+            InlineKeyboardButton(sym, callback_data=f"bt:{sym}")
+            for sym in SYMBOLS
+        ]
+        rows = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
+        await query.message.reply_text(
+            "🧪 *Backtest* — choose a symbol:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
+    elif action == "help":
+        await query.message.reply_text(
+            "📋 *Available Commands*\n\n"
+            "/start — welcome message\n"
+            "/menu — show this menu\n"
+            "/status — open positions with live P&L\n"
+            "/pnl — closed trade history\n"
+            "/cancel SYMBOL — manually close a position\n"
+            "/subscribe SYMBOL — get DM alerts for a symbol\n"
+            "/unsubscribe — remove all subscriptions\n"
+            "/backtest SYMBOL [years] — historical backtest\n"
+            "/scan — live indicator snapshot\n"
+            "/stats — signal accuracy stats",
+            parse_mode="Markdown",
+        )
+
+
+async def subscribe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle tap on a symbol subscribe button from the menu."""
+    query = update.callback_query
+    await query.answer()
+    symbol = query.data.split(":", 1)[1]
+    subscribe_user(str(query.from_user.id), [symbol])
+    await query.edit_message_text(
+        f"✅ Subscribed to *{symbol}*\n\nYou'll get DM alerts when signals fire.\n\n"
+        f"Use /unsubscribe to remove, or /subscribe to add more.",
+        parse_mode="Markdown",
+    )
+
+
+async def backtest_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle tap on a symbol backtest button from the menu."""
+    query = update.callback_query
+    await query.answer()
+    symbol = query.data.split(":", 1)[1]
+    await query.edit_message_text(f"⏳ Running 2-year backtest for *{symbol}*…", parse_mode="Markdown")
+    try:
+        result = run_backtest(symbol, years=2)
+        await query.message.reply_text(format_backtest_message(result), parse_mode="Markdown")
+    except Exception as e:
+        await query.message.reply_text(f"❌ Backtest failed: {e}")
+
+
+# Text button handler — maps reply keyboard labels to commands
+_TEXT_ACTIONS: dict[str, str] = {
+    "📊 positions": "status",
+    "📈 p&l history": "pnl",
+    "🔍 scan market": "scan",
+    "📉 stats": "stats",
+    "📬 subscriptions": "subscribe",
+    "🧪 backtest": "backtest_prompt",
+    "📋 menu": "open_menu",
+}
+
+
+async def text_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Route reply-keyboard button taps to the right action."""
+    text = update.message.text.strip().lower()
+    action = _TEXT_ACTIONS.get(text)
+    if not action:
+        return
+    log_user(update.effective_user.id, update.effective_user.username or "")
+    if action == "open_menu":
+        await update.message.reply_text(
+            "📋 *Main Menu* — choose an action:",
+            parse_mode="Markdown",
+            reply_markup=_main_menu_inline(),
+        )
+    else:
+        # Simulate a callback query by firing the appropriate command handler
+        fake_update = update
+        if action == "status":
+            await cmd_status(fake_update, context)
+        elif action == "pnl":
+            await cmd_pnl(fake_update, context)
+        elif action == "scan":
+            await cmd_scan(fake_update, context)
+        elif action == "stats":
+            await cmd_stats(fake_update, context)
+        elif action == "subscribe":
+            await cmd_subscribe(fake_update, context)
+        elif action == "backtest_prompt":
+            buttons = [
+                InlineKeyboardButton(sym, callback_data=f"bt:{sym}")
+                for sym in SYMBOLS
+            ]
+            rows = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
+            await update.message.reply_text(
+                "🧪 *Backtest* — choose a symbol:",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+
+
 # ── Commands ──────────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -515,14 +810,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"📈 *Trading Signals Bot*{channel_text}\n\n"
         "Signals are posted to the channel with Entry, Target, Stop Loss, and R/R ratio.\n\n"
         "Tap *Track this trade* on any BUY signal to get automatic TP/SL alerts.\n\n"
-        "Commands:\n"
-        "/status       — open positions (live P&L)\n"
-        "/pnl          — trade history\n"
-        "/cancel SYMBOL — close a position\n"
-        "/subscribe    — get DM alerts for specific symbols\n"
-        "/backtest SYMBOL — 2-year backtest results\n"
-        "/stats        — signal accuracy stats",
+        "Use the buttons below or /menu to navigate.",
         parse_mode="Markdown",
+        reply_markup=_reply_keyboard(),
     )
 
 
@@ -792,6 +1082,20 @@ async def post_init(app: Application) -> None:
     me = await app.bot.get_me()
     BOT_USERNAME = me.username
     init_db()
+
+    # Register commands so they appear in Telegram's "/" command list
+    await app.bot.set_my_commands([
+        BotCommand("menu", "Show main menu"),
+        BotCommand("status", "Open positions with live P&L"),
+        BotCommand("pnl", "Closed trade history"),
+        BotCommand("cancel", "Close a position manually"),
+        BotCommand("subscribe", "Get DM alerts for a symbol"),
+        BotCommand("unsubscribe", "Remove subscriptions"),
+        BotCommand("backtest", "2-year historical backtest"),
+        BotCommand("scan", "Live indicator snapshot"),
+        BotCommand("stats", "Signal accuracy stats"),
+    ])
+
     if ADMIN_CHAT_ID:
         session = market_session()
         labels = {"open": "🟢 Open", "pre": "🌅 Pre-market", "after": "🌙 After-hours", "closed": "⛔ Closed"}
@@ -822,7 +1126,8 @@ def main() -> None:
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     for cmd, fn in [
-        ("start", cmd_start), ("status", cmd_status), ("pnl", cmd_pnl),
+        ("start", cmd_start), ("menu", cmd_menu),
+        ("status", cmd_status), ("pnl", cmd_pnl),
         ("cancel", cmd_cancel), ("stats", cmd_stats), ("scan", cmd_scan),
         ("train", cmd_train), ("test", cmd_test),
         ("subscribe", cmd_subscribe), ("unsubscribe", cmd_unsubscribe),
@@ -831,6 +1136,14 @@ def main() -> None:
         app.add_handler(CommandHandler(cmd, fn))
 
     app.add_handler(CallbackQueryHandler(close_callback, pattern=r"^close:"))
+    app.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^menu:"))
+    app.add_handler(CallbackQueryHandler(subscribe_callback, pattern=r"^sub:"))
+    app.add_handler(CallbackQueryHandler(backtest_callback, pattern=r"^bt:"))
+
+    # Reply keyboard text buttons
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND, text_button_handler
+    ))
 
     # Scan every SCAN_INTERVAL seconds
     app.job_queue.run_repeating(scan_and_alert, interval=SCAN_INTERVAL, first=10)
