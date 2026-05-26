@@ -13,7 +13,7 @@ from typing import Optional
 import pandas as pd
 import yfinance as yf
 
-from signals import _rsi, _macd, _atr, _vol_spike, is_crypto
+from signals import combine_signals, get_bias_from_df, is_crypto, signal_from_df
 
 
 @dataclass
@@ -31,8 +31,9 @@ class Trade:
 
 
 def _fetch(symbol: str, years: int = 2) -> pd.DataFrame:
-    period = f"{years * 365}d"
-    interval = "1d"
+    period_days = min(years * 365, 730)
+    period = f"{period_days}d"
+    interval = "1h"
     df = yf.download(symbol, period=period, interval=interval,
                      progress=False, auto_adjust=True)
     if isinstance(df.columns, pd.MultiIndex):
@@ -42,38 +43,27 @@ def _fetch(symbol: str, years: int = 2) -> pd.DataFrame:
 
 def _simulate(symbol: str, df: pd.DataFrame,
               sl_mult: float = 1.5, tp_mult: float = 2.5,
-              timeout_bars: int = 20) -> list[Trade]:
+              timeout_bars: int = 24) -> list[Trade]:
     """
     Walk-forward simulation on daily bars.
-    Signal: 2-of-3 indicators (RSI, MACD, EMA9/21 crossover).
-    Exit: next-day TP/SL check on High/Low; timeout after `timeout_bars` days.
+    Signal: same state-based rule engine used by the live bot, approximated on 1h bars.
+    Exit: intrabar TP/SL check on High/Low; timeout after `timeout_bars` bars.
     """
-    if len(df) < 60:
+    if len(df) < 250:
         return []
-
-    close = df["Close"].squeeze()
-    rsi = _rsi(close)
-    macd_line, signal_line = _macd(close)
-    ema9 = close.ewm(span=9, adjust=False).mean()
-    ema21 = close.ewm(span=21, adjust=False).mean()
-    atr = _atr(df)
 
     trades: list[Trade] = []
     in_trade = False
     current: Trade | None = None
+    entry_idx = -1
 
-    for i in range(30, len(df) - 1):
+    for i in range(200, len(df)):
         date_str = str(df.index[i])[:10]
-        price = float(close.iloc[i])
-        atr_val = float(atr.iloc[i])
-        if pd.isna(atr_val) or atr_val == 0:
-            continue
 
         # ── Manage open trade ────────────────────────────────────────────────
         if in_trade and current is not None:
             day_high = float(df["High"].iloc[i])
             day_low = float(df["Low"].iloc[i])
-            bars_held = trades[-1] if trades else None
 
             if current.action == "BUY":
                 if day_high >= current.tp:
@@ -104,59 +94,63 @@ def _simulate(symbol: str, df: pd.DataFrame,
 
             # Timeout: close at close price after N bars
             if in_trade and current is not None:
-                entry_idx = df.index.get_loc(
-                    pd.Timestamp(current.entry_date) if not isinstance(
-                        df.index[0], str) else current.entry_date
-                ) if current.entry_date in [str(x)[:10] for x in df.index] else None
-                if entry_idx is not None and (i - entry_idx) >= timeout_bars:
+                if entry_idx >= 0 and (i - entry_idx) >= timeout_bars:
                     current.exit_date = date_str
-                    current.exit_price = price
+                    current.exit_price = float(df["Close"].iloc[i])
                     current.exit_reason = "TIMEOUT"
                     if current.action == "BUY":
-                        current.pnl_pct = (price - current.entry_price) / current.entry_price * 100
+                        current.pnl_pct = (current.exit_price - current.entry_price) / current.entry_price * 100
                     else:
-                        current.pnl_pct = (current.entry_price - price) / current.entry_price * 100
+                        current.pnl_pct = (current.entry_price - current.exit_price) / current.entry_price * 100
                     in_trade = False
             continue  # don't open new trade while managing existing one
 
         # ── Look for signal ──────────────────────────────────────────────────
-        rsi_now = float(rsi.iloc[i])
-        macd_bull = (float(macd_line.iloc[i - 1]) < float(signal_line.iloc[i - 1])
-                     and float(macd_line.iloc[i]) > float(signal_line.iloc[i]))
-        macd_bear = (float(macd_line.iloc[i - 1]) > float(signal_line.iloc[i - 1])
-                     and float(macd_line.iloc[i]) < float(signal_line.iloc[i]))
-        ema_bull = (float(ema9.iloc[i - 1]) < float(ema21.iloc[i - 1])
-                    and float(ema9.iloc[i]) > float(ema21.iloc[i]))
-        ema_bear = (float(ema9.iloc[i - 1]) > float(ema21.iloc[i - 1])
-                    and float(ema9.iloc[i]) < float(ema21.iloc[i]))
+        window = df.iloc[:i + 1]
+        rule_sig = signal_from_df(symbol, window)
+        bias_window = window.resample("4h").agg({
+            "Open": "first",
+            "High": "max",
+            "Low": "min",
+            "Close": "last",
+            "Volume": "sum",
+        }).dropna()
+        bias = get_bias_from_df(bias_window)
+        sig = combine_signals(
+            rule_sig,
+            {"buy_prob": None, "sell_prob": None, "ai_signal": None},
+            symbol,
+            float(window["Close"].iloc[-1]),
+            float(rule_sig["rsi"]) if rule_sig else 50.0,
+            df_5m=window,
+            df_1h=bias_window,
+            bias_1h=bias,
+        )
 
-        buy_hits = sum([rsi_now < 40, macd_bull, ema_bull])
-        sell_hits = sum([rsi_now > 60, macd_bear, ema_bear])
-
-        sl_dist = atr_val * sl_mult
-        tp_dist = atr_val * tp_mult
-
-        action = None
-        if buy_hits >= 2:
-            action = "BUY"
-        elif sell_hits >= 2:
-            action = "SELL"
-
-        if action:
-            is_buy = action == "BUY"
-            tp = round(price + tp_dist if is_buy else price - tp_dist, 4)
-            sl = round(price - sl_dist if is_buy else price + sl_dist, 4)
+        if sig:
+            atr_val = float(sig.get("atr", 0.0) or 0.0)
+            entry_price = float(sig["price"])
+            is_buy = sig["action"] == "BUY"
+            tp = sig["tp"]
+            sl = sig["sl"]
+            if atr_val > 0:
+                tp = round(entry_price + atr_val * tp_mult if is_buy else entry_price - atr_val * tp_mult, 4)
+                sl = round(entry_price - atr_val * sl_mult if is_buy else entry_price + atr_val * sl_mult, 4)
             current = Trade(
-                symbol=symbol, action=action,
-                entry_date=date_str, entry_price=price,
-                tp=tp, sl=sl,
+                symbol=symbol,
+                action=sig["action"],
+                entry_date=date_str,
+                entry_price=entry_price,
+                tp=tp,
+                sl=sl,
             )
             trades.append(current)
             in_trade = True
+            entry_idx = i
 
     # Close any still-open trade at last bar
     if in_trade and current is not None and current.exit_date is None:
-        last_price = float(close.iloc[-1])
+        last_price = float(df["Close"].iloc[-1])
         current.exit_date = str(df.index[-1])[:10]
         current.exit_price = last_price
         current.exit_reason = "TIMEOUT"
@@ -218,6 +212,7 @@ def run_backtest(symbol: str, years: int = 2,
     return {
         "symbol": symbol,
         "years": years,
+        "interval": "1h",
         "total_trades": len(completed),
         "win_rate": win_rate,
         "avg_pnl_pct": avg_pnl,
@@ -248,6 +243,7 @@ def format_backtest_message(result: dict) -> str:
 
     sym = result["symbol"]
     yrs = result.get("years", 2)
+    interval = result.get("interval", "1h")
     n = result["total_trades"]
     wr = result["win_rate"]
     avg = result["avg_pnl_pct"]
@@ -264,6 +260,7 @@ def format_backtest_message(result: dict) -> str:
 
     lines = [
         f"📊 *Backtest: {sym}* ({yrs}y)",
+        f"_Approximation uses live rule logic on {interval} candles with 4h bias._",
         "",
         f"Trades: {n}  |  Win rate: {win_emoji} {wr}%",
         f"Avg P&L: {avg:+.2f}%  |  Total: {pnl_emoji} {total:+.2f}%",

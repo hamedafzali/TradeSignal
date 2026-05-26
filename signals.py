@@ -124,6 +124,56 @@ def _stars(score: int) -> str:
     return "⭐" * score + "☆" * (5 - score)
 
 
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
+
+def _adaptive_tp_sl(price: float, atr_val: float, symbol: str) -> tuple[float, float, str | None]:
+    """
+    Returns (sl_mult, tp_mult, note). Falls back to defaults when there
+    is not enough recent resolved-outcome data.
+    """
+    base_sl, base_tp = 1.5, 2.5
+    if atr_val <= 0 or price <= 0:
+        return base_sl, base_tp, None
+    try:
+        from database import get_symbol_outcome_profile
+        profile = get_symbol_outcome_profile(symbol)
+    except Exception:
+        return base_sl, base_tp, None
+
+    if profile.get("sample_size", 0) < 8:
+        return base_sl, base_tp, None
+
+    atr_pct = atr_val / price * 100
+    if atr_pct <= 0:
+        return base_sl, base_tp, None
+
+    avg_fav = profile.get("avg_favorable_pct")
+    avg_adv = profile.get("avg_adverse_pct")
+    if avg_fav is None or avg_adv is None or avg_adv <= 0:
+        return base_sl, base_tp, None
+
+    target_sl_pct = _clamp(avg_adv * 1.1, 0.35, 4.0)
+    target_tp_pct = _clamp(max(avg_fav * 0.85, target_sl_pct * 1.2), 0.5, 6.0)
+
+    timeout_rate = float(profile.get("timeout_rate", 0.0) or 0.0)
+    ambiguous_rate = float(profile.get("ambiguous_rate", 0.0) or 0.0)
+    if timeout_rate >= 0.25:
+        target_tp_pct *= 0.9
+    if ambiguous_rate >= 0.20:
+        target_sl_pct *= 1.1
+        target_tp_pct *= 1.05
+
+    sl_mult = _clamp(target_sl_pct / atr_pct, 1.0, 2.8)
+    tp_mult = _clamp(target_tp_pct / atr_pct, 1.4, 4.2)
+    note = (
+        f"Adaptive TP/SL tuned from {profile['sample_size']} outcomes "
+        f"(MFE {avg_fav:.2f}% / MAE {avg_adv:.2f}%)"
+    )
+    return sl_mult, tp_mult, note
+
+
 # ── 1h bias for multi-timeframe confirmation ──────────────────────────────────
 
 def get_1h_bias(symbol: str) -> tuple[str | None, pd.DataFrame | None]:
@@ -166,6 +216,113 @@ def get_1h_bias(symbol: str) -> tuple[str | None, pd.DataFrame | None]:
         return None, None
 
 
+def get_bias_from_df(df: pd.DataFrame) -> str | None:
+    """Evaluate multi-timeframe bias from historical candles."""
+    if df.empty or len(df) < 50:
+        return None
+
+    close = df["Close"].squeeze()
+    rsi = _rsi(close)
+    macd_line, signal_line = _macd(close)
+    ema9 = close.ewm(span=9, adjust=False).mean()
+    ema21 = close.ewm(span=21, adjust=False).mean()
+
+    rsi_now = float(rsi.iloc[-1])
+    macd_bull = float(macd_line.iloc[-1]) > float(signal_line.iloc[-1])
+    macd_bear = float(macd_line.iloc[-1]) < float(signal_line.iloc[-1])
+    ema_bull = float(ema9.iloc[-1]) > float(ema21.iloc[-1])
+    ema_bear = float(ema9.iloc[-1]) < float(ema21.iloc[-1])
+
+    buy_hits = [rsi_now < 45, macd_bull, ema_bull]
+    sell_hits = [rsi_now > 55, macd_bear, ema_bear]
+
+    if sum(buy_hits) >= 2:
+        return "BUY"
+    if sum(sell_hits) >= 2:
+        return "SELL"
+    return None
+
+
+def signal_from_df(symbol: str, df: pd.DataFrame,
+                   df_1h: pd.DataFrame | None = None) -> dict | None:
+    """Pure dataframe-based version of the live rule signal logic."""
+    if df.empty or len(df) < 50:
+        return None
+
+    close = df["Close"].squeeze()
+    rsi = _rsi(close)
+    macd_line, signal_line = _macd(close)
+    ema9 = close.ewm(span=9, adjust=False).mean()
+    ema21 = close.ewm(span=21, adjust=False).mean()
+    atr = _atr(df)
+
+    rsi_now = float(rsi.iloc[-1])
+    price = float(close.iloc[-1])
+    atr_val = float(atr.iloc[-1])
+    if pd.isna(atr_val) or atr_val <= 0:
+        return None
+
+    has_vol_spike = _vol_spike(df)
+    macd_bull = float(macd_line.iloc[-1]) > float(signal_line.iloc[-1])
+    macd_bear = float(macd_line.iloc[-1]) < float(signal_line.iloc[-1])
+    ema_bull = float(ema9.iloc[-1]) > float(ema21.iloc[-1])
+    ema_bear = float(ema9.iloc[-1]) < float(ema21.iloc[-1])
+
+    buy_hits = [rsi_now < 45, macd_bull, ema_bull]
+    sell_hits = [rsi_now > 55, macd_bear, ema_bear]
+    trend = _trend(df_1h) if df_1h is not None and not df_1h.empty else "unknown"
+
+    sl_mult, tp_mult, adaptive_note = _adaptive_tp_sl(price, atr_val, symbol)
+    sl_dist = atr_val * sl_mult
+    tp_dist = atr_val * tp_mult
+    rr = round(tp_dist / sl_dist, 1) if sl_dist > 0 else 0
+
+    reasons_buy = []
+    if rsi_now < 45:
+        reasons_buy.append(f"RSI oversold ({rsi_now:.1f})")
+    if macd_bull:
+        reasons_buy.append("MACD above signal (bullish)")
+    if ema_bull:
+        reasons_buy.append("EMA9 above EMA21 (bullish)")
+        if has_vol_spike:
+            reasons_buy.append("Volume spike (+50% above avg)")
+        if adaptive_note:
+            reasons_buy.append(adaptive_note)
+
+    reasons_sell = []
+    if rsi_now > 55:
+        reasons_sell.append(f"RSI overbought ({rsi_now:.1f})")
+    if macd_bear:
+        reasons_sell.append("MACD below signal (bearish)")
+    if ema_bear:
+        reasons_sell.append("EMA9 below EMA21 (bearish)")
+        if has_vol_spike:
+            reasons_sell.append("Volume spike (+50% above avg)")
+        if adaptive_note:
+            reasons_sell.append(adaptive_note)
+
+    def _make(action: str, reasons: list[str]) -> dict:
+        is_buy = action == "BUY"
+        tp = round(price + tp_dist if is_buy else price - tp_dist, 2)
+        sl = round(price - sl_dist if is_buy else price + sl_dist, 2)
+        tp_pct = round((tp - price) / price * 100, 2)
+        sl_pct = round((sl - price) / price * 100, 2)
+        return {
+            "symbol": symbol, "action": action, "price": price,
+            "tp": tp, "sl": sl, "tp_pct": tp_pct, "sl_pct": sl_pct, "rr": rr,
+            "rsi": rsi_now, "trend": trend, "atr": atr_val,
+            "vol_spike": has_vol_spike, "reasons": reasons,
+            "strength": "RULE", "ai_confidence": None, "quality": 0,
+            "sl_mult": round(sl_mult, 2), "tp_mult": round(tp_mult, 2),
+        }
+
+    if sum(buy_hits) >= 2:
+        return _make("BUY", reasons_buy)
+    if sum(sell_hits) >= 2:
+        return _make("SELL", reasons_sell)
+    return None
+
+
 # ── Main signal function ──────────────────────────────────────────────────────
 
 def get_signal(symbol: str, df_1h: pd.DataFrame | None = None) -> tuple[dict | None, pd.DataFrame | None]:
@@ -188,74 +345,7 @@ def get_signal(symbol: str, df_1h: pd.DataFrame | None = None) -> tuple[dict | N
         if df.empty or len(df) < min_bars:
             return None, None
 
-        close = df["Close"].squeeze()
-        rsi = _rsi(close)
-        macd_line, signal_line = _macd(close)
-        ema9 = close.ewm(span=9, adjust=False).mean()
-        ema21 = close.ewm(span=21, adjust=False).mean()
-        atr = _atr(df)
-
-        rsi_now = float(rsi.iloc[-1])
-        price = float(close.iloc[-1])
-        atr_val = float(atr.iloc[-1])
-
-        has_vol_spike = _vol_spike(df)
-
-        # State-based: current position, not requiring a fresh crossover
-        macd_bull = float(macd_line.iloc[-1]) > float(signal_line.iloc[-1])
-        macd_bear = float(macd_line.iloc[-1]) < float(signal_line.iloc[-1])
-        ema_bull  = float(ema9.iloc[-1]) > float(ema21.iloc[-1])
-        ema_bear  = float(ema9.iloc[-1]) < float(ema21.iloc[-1])
-
-        buy_hits = [rsi_now < 45, macd_bull, ema_bull]
-        sell_hits = [rsi_now > 55, macd_bear, ema_bear]
-
-        trend = _trend(df_1h) if df_1h is not None and not df_1h.empty else "unknown"
-
-        sl_dist = atr_val * 1.5
-        tp_dist = atr_val * 2.5
-        rr = round(tp_dist / sl_dist, 1) if sl_dist > 0 else 0
-
-        reasons_buy = []
-        if rsi_now < 45:
-            reasons_buy.append(f"RSI oversold ({rsi_now:.1f})")
-        if macd_bull:
-            reasons_buy.append("MACD above signal (bullish)")
-        if ema_bull:
-            reasons_buy.append("EMA9 above EMA21 (bullish)")
-        if has_vol_spike:
-            reasons_buy.append("Volume spike (+50% above avg)")
-
-        reasons_sell = []
-        if rsi_now > 55:
-            reasons_sell.append(f"RSI overbought ({rsi_now:.1f})")
-        if macd_bear:
-            reasons_sell.append("MACD below signal (bearish)")
-        if ema_bear:
-            reasons_sell.append("EMA9 below EMA21 (bearish)")
-        if has_vol_spike:
-            reasons_sell.append("Volume spike (+50% above avg)")
-
-        def _make(action: str, hits: int, reasons: list) -> dict:
-            is_buy = action == "BUY"
-            tp = round(price + tp_dist if is_buy else price - tp_dist, 2)
-            sl = round(price - sl_dist if is_buy else price + sl_dist, 2)
-            tp_pct = round((tp - price) / price * 100, 2)
-            sl_pct = round((sl - price) / price * 100, 2)
-            return {
-                "symbol": symbol, "action": action, "price": price,
-                "tp": tp, "sl": sl, "tp_pct": tp_pct, "sl_pct": sl_pct, "rr": rr,
-                "rsi": rsi_now, "trend": trend, "atr": atr_val,
-                "vol_spike": has_vol_spike, "reasons": reasons,
-                "strength": "RULE", "ai_confidence": None, "quality": 0,
-            }
-
-        if sum(buy_hits) >= 2:
-            return _make("BUY", sum(buy_hits), reasons_buy), df
-        if sum(sell_hits) >= 2:
-            return _make("SELL", sum(sell_hits), reasons_sell), df
-
-        return None, df
+        return signal_from_df(symbol, df, df_1h=df_1h), df
 
     except Exception as exc:
         print(f"[signals] Error fetching {symbol}: {exc}")
@@ -293,8 +383,9 @@ def combine_signals(rule_sig: dict | None, ml_result: dict,
             if df_1h is not None and not df_1h.empty:
                 trend = _trend(df_1h)
             is_buy = ai_signal == "BUY"
-            tp_dist = atr_val * 2.5
-            sl_dist = atr_val * 1.5
+            sl_mult, tp_mult, adaptive_note = _adaptive_tp_sl(price, atr_val, symbol)
+            tp_dist = atr_val * tp_mult
+            sl_dist = atr_val * sl_mult
             tp = round(price + tp_dist if is_buy else price - tp_dist, 2)
             sl = round(price - sl_dist if is_buy else price + sl_dist, 2)
             tp_pct = round((tp - price) / price * 100, 2)
@@ -305,8 +396,9 @@ def combine_signals(rule_sig: dict | None, ml_result: dict,
                 "tp": tp, "sl": sl, "tp_pct": tp_pct, "sl_pct": sl_pct, "rr": rr,
                 "rsi": rsi, "trend": trend, "atr": atr_val,
                 "vol_spike": False,
-                "reasons": [f"AI model confidence {prob * 100:.0f}%"],
+                "reasons": [f"AI model confidence {prob * 100:.0f}%"] + ([adaptive_note] if adaptive_note else []),
                 "strength": "AI", "ai_confidence": prob, "quality": 0,
+                "sl_mult": round(sl_mult, 2), "tp_mult": round(tp_mult, 2),
             }
 
     if sig is None:

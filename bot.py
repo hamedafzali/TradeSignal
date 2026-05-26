@@ -1,6 +1,6 @@
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import yfinance as yf
@@ -29,6 +29,7 @@ from database import (
     get_all_open_positions,
     get_all_subscriber_ids,
     get_last_signal_action,
+    get_latest_signal,
     get_outcome_count,
     get_outcome_training_data,
     get_pending_outcomes,
@@ -111,10 +112,136 @@ def _current_features(df) -> dict:
         return {}
 
 
+def _resolve_signal_outcome(sig: dict) -> dict | None:
+    """
+    Resolve a signal using post-entry candle ranges instead of only the latest price.
+    Returns None when the signal should remain pending.
+    """
+    sent_at = datetime.fromisoformat(sig["sent_at"])
+    if sent_at.tzinfo is None:
+        sent_at = sent_at.replace(tzinfo=timezone.utc)
+
+    now = datetime.now(timezone.utc)
+    interval = "1h" if is_crypto(sig["symbol"]) else "5m"
+    pad = timedelta(hours=2) if interval == "1h" else timedelta(minutes=30)
+    end = now + timedelta(minutes=5)
+
+    df = yf.download(
+        sig["symbol"],
+        start=sent_at - pad,
+        end=end,
+        interval=interval,
+        progress=False,
+        auto_adjust=True,
+    )
+    if df.empty:
+        return None
+
+    if df.index.tz is None:
+        df.index = df.index.tz_localize("UTC")
+    else:
+        df.index = df.index.tz_convert("UTC")
+    df = df[df.index >= sent_at]
+    if df.empty:
+        return None
+
+    current_price = float(df["Close"].squeeze().iloc[-1])
+    tp = sig.get("tp")
+    sl = sig.get("sl")
+    age_hours = (now - sent_at).total_seconds() / 3600
+    entry = float(sig["price"])
+
+    highs = df["High"].astype(float)
+    lows = df["Low"].astype(float)
+    if sig["action"] == "BUY":
+        max_favorable_pct = ((float(highs.max()) - entry) / entry) * 100
+        max_adverse_pct = ((float(lows.min()) - entry) / entry) * 100
+    else:
+        max_favorable_pct = ((entry - float(lows.min())) / entry) * 100
+        max_adverse_pct = ((entry - float(highs.max())) / entry) * 100
+
+    def _meta(resolution_time: datetime | None,
+              resolution_reason: str,
+              touched_tp: bool = False,
+              touched_sl: bool = False) -> dict:
+        minutes = None
+        if resolution_time is not None:
+            minutes = round((resolution_time - sent_at).total_seconds() / 60, 1)
+        return {
+            "resolution_reason": resolution_reason,
+            "touched_tp": touched_tp,
+            "touched_sl": touched_sl,
+            "resolution_minutes": minutes,
+            "max_favorable_pct": round(max_favorable_pct, 2),
+            "max_adverse_pct": round(max_adverse_pct, 2),
+        }
+
+    if tp and sl:
+        for ts, row in df.iterrows():
+            high = float(row["High"])
+            low = float(row["Low"])
+            close = float(row["Close"])
+            if sig["action"] == "BUY":
+                hit_tp = high >= tp
+                hit_sl = low <= sl
+            else:
+                hit_tp = low <= tp
+                hit_sl = high >= sl
+
+            if hit_tp and hit_sl:
+                return {
+                    "outcome": "neutral",
+                    "price": close,
+                    "current_price": current_price,
+                    "metadata": _meta(ts, "both_hit_same_candle", touched_tp=True, touched_sl=True),
+                }
+            if hit_tp:
+                return {
+                    "outcome": "correct",
+                    "price": float(tp),
+                    "current_price": current_price,
+                    "metadata": _meta(ts, "tp_hit", touched_tp=True),
+                }
+            if hit_sl:
+                return {
+                    "outcome": "incorrect",
+                    "price": float(sl),
+                    "current_price": current_price,
+                    "metadata": _meta(ts, "sl_hit", touched_sl=True),
+                }
+
+        if age_hours < OUTCOME_CHECK_HOURS:
+            return None
+        return {
+            "outcome": "neutral",
+            "price": current_price,
+            "current_price": current_price,
+            "metadata": _meta(now, "timeout_no_hit"),
+        }
+
+    threshold = 0.005
+    if sig["action"] == "BUY":
+        outcome = ("correct" if current_price > entry * (1 + threshold)
+                   else "incorrect" if current_price < entry * (1 - threshold)
+                   else "neutral")
+        reason = "threshold_up" if outcome == "correct" else "threshold_down" if outcome == "incorrect" else "threshold_flat"
+    else:
+        outcome = ("correct" if current_price < entry * (1 - threshold)
+                   else "incorrect" if current_price > entry * (1 + threshold)
+                   else "neutral")
+        reason = "threshold_down" if outcome == "correct" else "threshold_up" if outcome == "incorrect" else "threshold_flat"
+    return {
+        "outcome": outcome,
+        "price": current_price,
+        "current_price": current_price,
+        "metadata": _meta(now, reason),
+    }
+
+
 async def _ensure_models_trained(bot=None) -> None:
-    outcome_data = get_outcome_training_data()
     for symbol, model in models.items():
         if model.needs_retrain():
+            outcome_data = get_outcome_training_data(symbol=symbol)
             ok = model.train(outcome_data=outcome_data)
             if bot and ok and ADMIN_CHAT_ID:
                 await bot.send_message(
@@ -142,34 +269,15 @@ async def check_outcomes(context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info(f"Checking outcomes for {len(pending)} signals...")
     for sig in pending:
         try:
-            df = yf.download(sig["symbol"], period="2d", interval="5m", progress=False, auto_adjust=True)
-            if df.empty:
+            resolved = _resolve_signal_outcome(sig)
+            if resolved is None:
                 continue
-            current_price = float(df["Close"].squeeze().iloc[-1])
+            current_price = resolved["current_price"]
             tp = sig.get("tp")
             sl = sig.get("sl")
+            outcome = resolved["outcome"]
 
-            if tp and sl and sig["action"] == "BUY":
-                outcome = ("correct" if current_price >= tp
-                           else "incorrect" if current_price <= sl
-                           else "neutral")
-            elif tp and sl and sig["action"] == "SELL":
-                outcome = ("correct" if current_price <= tp
-                           else "incorrect" if current_price >= sl
-                           else "neutral")
-            else:
-                threshold = 0.005
-                entry = sig["price"]
-                if sig["action"] == "BUY":
-                    outcome = ("correct" if current_price > entry * (1 + threshold)
-                               else "incorrect" if current_price < entry * (1 - threshold)
-                               else "neutral")
-                else:
-                    outcome = ("correct" if current_price < entry * (1 - threshold)
-                               else "incorrect" if current_price > entry * (1 + threshold)
-                               else "neutral")
-
-            update_outcome(sig["id"], outcome, current_price)
+            update_outcome(sig["id"], outcome, resolved["price"], metadata=resolved.get("metadata"))
             entry = sig["price"]
             pct = (current_price - entry) / entry * 100
             sign = "+" if pct >= 0 else ""
@@ -465,7 +573,10 @@ async def _broadcast_signal(bot, sig: dict, session: str = "open") -> None:
         return
     body = _channel_message(sig, session)
     if sig["action"] == "BUY" and BOT_USERNAME:
-        deep_link = f"https://t.me/{BOT_USERNAME}?start=track_{sig['symbol']}_{sig['price']}"
+        deep_link = (
+            f"https://t.me/{BOT_USERNAME}?start="
+            f"track_{sig['symbol']}_{sig['price']}_{sig.get('tp', 0)}_{sig.get('sl', 0)}"
+        )
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("📊 Track this trade", url=deep_link)
         ]])
@@ -883,11 +994,21 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if context.args and context.args[0].startswith("track_"):
         parts = context.args[0].split("_")
-        if len(parts) == 3:
-            _, symbol, price_str = parts
+        if len(parts) in (3, 5):
+            _, symbol, price_str, *rest = parts
             try:
                 price = float(price_str)
-                open_position(str(user.id), symbol, price)
+                tp = None
+                sl = None
+                if len(rest) == 2:
+                    tp = float(rest[0]) if float(rest[0]) > 0 else None
+                    sl = float(rest[1]) if float(rest[1]) > 0 else None
+                else:
+                    latest_buy = get_latest_signal(symbol, action="BUY")
+                    if latest_buy:
+                        tp = latest_buy.get("tp")
+                        sl = latest_buy.get("sl")
+                open_position(str(user.id), symbol, price, tp=tp, sl=sl)
                 await update.message.reply_text(
                     t("position_tracked", lang=lang, symbol=symbol, price=price),
                     parse_mode="Markdown",

@@ -241,10 +241,51 @@ _HTML = """<!DOCTYPE html>
         <div class="card p-3">
           <div class="d-flex justify-content-between align-items-center mb-3">
             <h6 class="mb-0">🩺 Model Health per Symbol</h6>
-            <button class="btn btn-sm" style="background:#1a2d3a;color:#38bdf8;border:1px solid #2a2d3a"
-              onclick="refreshActivity()">↻ Refresh</button>
+            <div class="d-flex gap-2 align-items-center">
+              <select id="activity-symbol" class="form-control" style="max-width:150px" onchange="refreshActivity()">
+                <option value="">All symbols</option>
+              </select>
+              <select id="activity-days" class="form-control" style="max-width:150px" onchange="refreshActivity()">
+                <option value="0">All time</option>
+                <option value="7">Last 7 days</option>
+                <option value="30">Last 30 days</option>
+                <option value="90">Last 90 days</option>
+              </select>
+              <button class="btn btn-sm" style="background:#1a2d3a;color:#38bdf8;border:1px solid #2a2d3a"
+                onclick="refreshActivity()">↻ Refresh</button>
+            </div>
           </div>
           <div id="health-cards" class="row g-3"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row g-3 mb-4">
+      <div class="col-md-6">
+        <div class="card p-3">
+          <h6 class="mb-3">🧭 Outcome Resolution Reasons</h6>
+          <canvas id="chart-resolution-reasons" height="200"></canvas>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <div class="card p-3">
+          <h6 class="mb-3">⏱ Average Time to Outcome</h6>
+          <canvas id="chart-resolution-time" height="200"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <div class="row g-3 mb-4">
+      <div class="col-md-6">
+        <div class="card p-3">
+          <h6 class="mb-3">📏 MFE vs MAE by Symbol</h6>
+          <canvas id="chart-mfe-mae" height="200"></canvas>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <div class="card p-3 h-100">
+          <h6 class="mb-3">🧠 Adaptive TP/SL Tuning</h6>
+          <div id="adaptive-summary" style="font-size:.84rem;color:#8b8fa8;line-height:1.7"></div>
         </div>
       </div>
     </div>
@@ -331,7 +372,7 @@ Chart.defaults.plugins.tooltip.bodyColor = '#8b8fa8';
 Chart.defaults.plugins.tooltip.borderColor = '#2a2d3a';
 Chart.defaults.plugins.tooltip.borderWidth = 1;
 
-let dailyChart, symbolChart, bucketsChart, strengthChart;
+let dailyChart, symbolChart, bucketsChart, strengthChart, resolutionReasonsChart, resolutionTimeChart, mfeMaeChart;
 
 function badge(text, cls) {
   return `<span class="badge rounded-pill ${cls} px-2 py-1">${text}</span>`;
@@ -623,7 +664,25 @@ function modelAge(ts) {
 }
 
 async function refreshActivity() {
-  const data = await fetch('/api/ml-activity').then(r=>r.json());
+  const symbol = document.getElementById('activity-symbol')?.value || '';
+  const days = document.getElementById('activity-days')?.value || '0';
+  const params = new URLSearchParams();
+  if (symbol) params.set('symbol', symbol);
+  if (days && days !== '0') params.set('days', days);
+  const data = await fetch('/api/ml-activity' + (params.toString() ? `?${params}` : '')).then(r=>r.json());
+  const symbolSelect = document.getElementById('activity-symbol');
+  if (symbolSelect && symbolSelect.options.length <= 1) {
+    const current = data.filters?.symbol || '';
+    symbolSelect.innerHTML = '<option value="">All symbols</option>' +
+      (data.available_symbols || []).map(sym =>
+        `<option value="${sym}" ${sym === current ? 'selected' : ''}>${sym}</option>`
+      ).join('');
+  }
+  const daysSelect = document.getElementById('activity-days');
+  if (daysSelect && data.filters) {
+    daysSelect.value = String(data.filters.days || 0);
+    if (data.filters.symbol && symbolSelect) symbolSelect.value = data.filters.symbol;
+  }
 
   // ── Model health cards ──
   const health = data.symbol_health || {};
@@ -652,6 +711,103 @@ async function refreshActivity() {
         </div>
       </div>`;
     }).join('') || '<div class="col-12" style="color:#555">No training data yet — models train automatically once signals accumulate outcomes.</div>';
+
+  const reasonMap = {
+    tp_hit: 'TP Hit',
+    sl_hit: 'SL Hit',
+    both_hit_same_candle: 'Both Same Candle',
+    timeout_no_hit: 'Timed Out',
+    threshold_up: 'Threshold Up',
+    threshold_down: 'Threshold Down',
+    threshold_flat: 'Threshold Flat',
+    unknown: 'Unknown',
+  };
+  const reasonRows = data.resolution_reason_breakdown || [];
+  const reasonLabels = reasonRows.map(r => reasonMap[r.reason] || r.reason);
+  const reasonCounts = reasonRows.map(r => r.count);
+  const reasonColors = ['#4ade80', '#f87171', '#fbbf24', '#38bdf8', '#a78bfa', '#fb923c', '#94a3b8'];
+  if (!resolutionReasonsChart) {
+    resolutionReasonsChart = new Chart(document.getElementById('chart-resolution-reasons'), {
+      type: 'doughnut',
+      data: {
+        labels: reasonLabels,
+        datasets: [{
+          data: reasonCounts,
+          backgroundColor: reasonColors.slice(0, Math.max(reasonLabels.length, 1)),
+          borderColor: '#1a1d27',
+          borderWidth: 3,
+        }],
+      },
+      options: {plugins:{legend:{labels:{color:'#8b8fa8'}}}}
+    });
+  } else {
+    resolutionReasonsChart.data.labels = reasonLabels;
+    resolutionReasonsChart.data.datasets[0].data = reasonCounts;
+    resolutionReasonsChart.update();
+  }
+
+  const timeRows = data.resolution_time_by_symbol || [];
+  const timeLabels = timeRows.map(r => r.symbol);
+  const timeValues = timeRows.map(r => r.avg_resolution_minutes);
+  if (!resolutionTimeChart) {
+    resolutionTimeChart = new Chart(document.getElementById('chart-resolution-time'), {
+      type:'bar',
+      data:{labels:timeLabels, datasets:[{
+        label:'Minutes',
+        data:timeValues,
+        backgroundColor:'#38bdf8aa',
+        borderColor:'#38bdf8',
+        borderWidth:1,
+      }]},
+      options:{plugins:{legend:{labels:{color:'#8b8fa8'}}},
+        scales:{
+          x:{ticks:{color:'#8b8fa8'},grid:{color:'#2a2d3a'}},
+          y:{ticks:{color:'#8b8fa8'},grid:{color:'#2a2d3a'},title:{display:true,text:'Minutes',color:'#8b8fa8'}}
+        }}
+    });
+  } else {
+    resolutionTimeChart.data.labels = timeLabels;
+    resolutionTimeChart.data.datasets[0].data = timeValues;
+    resolutionTimeChart.update();
+  }
+
+  const mfeMaeRows = data.mfe_mae_by_symbol || [];
+  const mfeMaeLabels = mfeMaeRows.map(r => r.symbol);
+  const mfeVals = mfeMaeRows.map(r => r.avg_favorable_pct ?? 0);
+  const maeVals = mfeMaeRows.map(r => r.avg_adverse_pct ?? 0);
+  if (!mfeMaeChart) {
+    mfeMaeChart = new Chart(document.getElementById('chart-mfe-mae'), {
+      type:'bar',
+      data:{labels:mfeMaeLabels, datasets:[
+        {label:'MFE %', data:mfeVals, backgroundColor:'#4ade80aa', borderColor:'#4ade80', borderWidth:1},
+        {label:'MAE %', data:maeVals, backgroundColor:'#f87171aa', borderColor:'#f87171', borderWidth:1},
+      ]},
+      options:{plugins:{legend:{labels:{color:'#8b8fa8'}}},
+        scales:{
+          x:{ticks:{color:'#8b8fa8'},grid:{color:'#2a2d3a'}},
+          y:{ticks:{color:'#8b8fa8'},grid:{color:'#2a2d3a'},title:{display:true,text:'Percent move',color:'#8b8fa8'}}
+        }}
+    });
+  } else {
+    mfeMaeChart.data.labels = mfeMaeLabels;
+    mfeMaeChart.data.datasets[0].data = mfeVals;
+    mfeMaeChart.data.datasets[1].data = maeVals;
+    mfeMaeChart.update();
+  }
+
+  const adaptiveRows = mfeMaeRows.filter(r => r.avg_favorable_pct !== null && r.avg_adverse_pct !== null);
+  document.getElementById('adaptive-summary').innerHTML = adaptiveRows.length
+    ? adaptiveRows.map(r => {
+        const rr = r.avg_adverse_pct > 0 ? (r.avg_favorable_pct / r.avg_adverse_pct).toFixed(2) : '—';
+        return `<div class="mb-2">
+          <span class="sym-tag">${r.symbol}</span>
+          <span style="color:#e0e0e0"> MFE ${Number(r.avg_favorable_pct).toFixed(2)}% </span>
+          <span style="color:#8b8fa8">vs</span>
+          <span style="color:#e0e0e0"> MAE ${Number(r.avg_adverse_pct).toFixed(2)}% </span>
+          <span style="color:#fbbf24"> · live RR anchor ${rr}</span>
+        </div>`;
+      }).join('')
+    : '<div style="color:#555">Not enough resolved outcome data yet for adaptive TP/SL guidance.</div>';
 
   // ── Training event log ──
   const events = data.training_events || [];
@@ -682,6 +838,17 @@ async function refreshActivity() {
         const emoji = o.outcome === 'correct' ? '✅' : o.outcome === 'incorrect' ? '❌' : '➖';
         const conf = o.ai_confidence ? ` · AI ${(o.ai_confidence*100).toFixed(0)}%` : '';
         const when = o.outcome_at ? new Date(o.outcome_at+'Z').toLocaleString() : '—';
+        const reason = o.resolution_reason ? (reasonMap[o.resolution_reason] || o.resolution_reason) : '—';
+        const travel = [];
+        if (o.max_favorable_pct !== null && o.max_favorable_pct !== undefined) {
+          travel.push(`MFE +${Number(o.max_favorable_pct).toFixed(2)}%`);
+        }
+        if (o.max_adverse_pct !== null && o.max_adverse_pct !== undefined) {
+          travel.push(`MAE ${Number(o.max_adverse_pct).toFixed(2)}%`);
+        }
+        if (o.resolution_minutes !== null && o.resolution_minutes !== undefined) {
+          travel.push(`${Number(o.resolution_minutes).toFixed(0)} min`);
+        }
         return `<div class="outcome-row ${cls}">
           <div class="d-flex justify-content-between">
             <span><strong>${o.symbol}</strong> ${badge(o.action,'badge-'+o.action)} ${badge(o.strength||'RULE','badge-'+(o.strength||'RULE'))}</span>
@@ -690,6 +857,9 @@ async function refreshActivity() {
           <div style="color:#8b8fa8;margin-top:3px">
             ${emoji} <strong style="color:#e0e0e0">${o.outcome.toUpperCase()}</strong>
             · Entry $${o.price ? o.price.toFixed(2) : '—'}${conf}
+          </div>
+          <div style="color:#555;margin-top:3px;font-size:.74rem">
+            ${reason}${travel.length ? ' · ' + travel.join(' · ') : ''}
           </div>
         </div>`;
       }).join('')
@@ -704,12 +874,24 @@ async function refreshActivity() {
     } else if (h.recent_acc < 45 && h.recent_count >= 5) {
       sugs.push({cls:'sug-warn', icon:'⚠️',
         text:`<strong>${sym}</strong>: recent accuracy ${h.recent_acc}% is below 45% on last ${h.recent_count} outcomes — model may be overfitting or market conditions changed`});
+    } else if (h.recent_unclear >= 3) {
+      sugs.push({cls:'sug-warn', icon:'🌀',
+        text:`<strong>${sym}</strong>: ${h.recent_unclear} of the last ${h.recent_count} outcomes were ambiguous or timed out — TP/SL may be too tight for current volatility`});
+    } else if (h.ambiguous_count >= 3) {
+      sugs.push({cls:'sug-info', icon:'↔️',
+        text:`<strong>${sym}</strong>: ${h.ambiguous_count} outcomes touched TP and SL in the same candle — consider wider stops or a higher timeframe for clearer labeling`});
+    } else if (h.timeout_count >= 3) {
+      sugs.push({cls:'sug-info', icon:'⌛',
+        text:`<strong>${sym}</strong>: ${h.timeout_count} resolved outcomes timed out without hitting TP/SL — targets may be too far or the outcome window too short`});
     } else if (h.trend === 'declining') {
       sugs.push({cls:'sug-warn', icon:'📉',
         text:`<strong>${sym}</strong>: accuracy declining (recent ${h.recent_acc}% vs all-time ${h.all_acc}%) — more outcomes are needed to retrain`});
     } else if (h.trend === 'improving') {
       sugs.push({cls:'sug-ok', icon:'📈',
         text:`<strong>${sym}</strong>: accuracy improving! Recent ${h.recent_acc}% vs all-time ${h.all_acc}% — continuous learning is working`});
+    } else if (h.avg_resolution_minutes !== null && h.avg_resolution_minutes > 720) {
+      sugs.push({cls:'sug-info', icon:'🕒',
+        text:`<strong>${sym}</strong>: outcomes take ${Math.round(h.avg_resolution_minutes)} minutes on average — consider a longer signal horizon or slower scan framing`});
     } else if (h.pending > 10) {
       sugs.push({cls:'sug-info', icon:'⏳',
         text:`<strong>${sym}</strong>: ${h.pending} signals still pending outcome — check outcome interval or if TP/SL were set on signals`});
@@ -765,7 +947,13 @@ def api_ml_stats():
 
 @app.route("/api/ml-activity")
 def api_ml_activity():
-    return jsonify(get_ml_activity_log())
+    symbol = (request.args.get("symbol") or "").strip().upper() or None
+    days_raw = (request.args.get("days") or "").strip()
+    try:
+        days = int(days_raw) if days_raw else None
+    except ValueError:
+        days = None
+    return jsonify(get_ml_activity_log(symbol=symbol, days=days))
 
 
 @app.route("/api/search")

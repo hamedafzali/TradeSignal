@@ -50,7 +50,13 @@ def init_db() -> None:
                 sent_at       TEXT,
                 outcome       TEXT DEFAULT 'pending',
                 outcome_price REAL,
-                outcome_at    TEXT
+                outcome_at    TEXT,
+                resolution_reason TEXT,
+                touched_tp    INTEGER DEFAULT 0,
+                touched_sl    INTEGER DEFAULT 0,
+                resolution_minutes REAL,
+                max_favorable_pct REAL,
+                max_adverse_pct REAL
             );
 
             CREATE TABLE IF NOT EXISTS positions (
@@ -100,6 +106,18 @@ def init_db() -> None:
             conn.execute("ALTER TABLE positions ADD COLUMN tp REAL")
         if "sl" not in cols:
             conn.execute("ALTER TABLE positions ADD COLUMN sl REAL")
+        signal_cols = [r[1] for r in conn.execute("PRAGMA table_info(signals)").fetchall()]
+        signal_migrations = {
+            "resolution_reason": "TEXT",
+            "touched_tp": "INTEGER DEFAULT 0",
+            "touched_sl": "INTEGER DEFAULT 0",
+            "resolution_minutes": "REAL",
+            "max_favorable_pct": "REAL",
+            "max_adverse_pct": "REAL",
+        }
+        for col, sql_type in signal_migrations.items():
+            if col not in signal_cols:
+                conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {sql_type}")
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────
@@ -154,6 +172,24 @@ def get_last_signal_action(symbol: str, within_hours: int = 6) -> str | None:
         return row["action"] if row else None
 
 
+def get_latest_signal(symbol: str, action: str | None = None) -> dict | None:
+    """Most recent signal for a symbol, optionally filtered by action."""
+    with _conn() as conn:
+        if action:
+            row = conn.execute("""
+                SELECT * FROM signals
+                WHERE symbol = ? AND action = ?
+                ORDER BY sent_at DESC LIMIT 1
+            """, (symbol, action)).fetchone()
+        else:
+            row = conn.execute("""
+                SELECT * FROM signals
+                WHERE symbol = ?
+                ORDER BY sent_at DESC LIMIT 1
+            """, (symbol,)).fetchone()
+        return dict(row) if row else None
+
+
 def get_pending_outcomes(older_than_hours: int = 24) -> list[dict]:
     cutoff = (datetime.utcnow() - timedelta(hours=older_than_hours)).isoformat()
     with _conn() as conn:
@@ -190,12 +226,28 @@ def get_outcome_count(symbol: str | None = None) -> int:
         return row[0]
 
 
-def update_outcome(signal_id: int, outcome: str, outcome_price: float) -> None:
+def update_outcome(signal_id: int, outcome: str, outcome_price: float,
+                   metadata: dict | None = None) -> None:
+    metadata = metadata or {}
     with _conn() as conn:
         conn.execute("""
-            UPDATE signals SET outcome = ?, outcome_price = ?, outcome_at = ?
+            UPDATE signals
+            SET outcome = ?, outcome_price = ?, outcome_at = ?,
+                resolution_reason = ?, touched_tp = ?, touched_sl = ?,
+                resolution_minutes = ?, max_favorable_pct = ?, max_adverse_pct = ?
             WHERE id = ?
-        """, (outcome, outcome_price, datetime.utcnow().isoformat(), signal_id))
+        """, (
+            outcome,
+            outcome_price,
+            datetime.utcnow().isoformat(),
+            metadata.get("resolution_reason"),
+            int(bool(metadata.get("touched_tp", False))),
+            int(bool(metadata.get("touched_sl", False))),
+            metadata.get("resolution_minutes"),
+            metadata.get("max_favorable_pct"),
+            metadata.get("max_adverse_pct"),
+            signal_id,
+        ))
 
 
 def get_outcome_training_data(symbol: str | None = None) -> list[dict]:
@@ -221,6 +273,42 @@ def get_outcome_training_data(symbol: str | None = None) -> list[dict]:
         )
         result.append({"features": feats, "label": label})
     return result
+
+
+def get_symbol_outcome_profile(symbol: str, lookback_days: int = 60) -> dict:
+    """Recent resolved-outcome aggregates used for TP/SL tuning."""
+    cutoff = (datetime.utcnow() - timedelta(days=lookback_days)).isoformat()
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT outcome, resolution_reason, max_favorable_pct, max_adverse_pct
+            FROM signals
+            WHERE symbol = ? AND outcome IN ('correct', 'incorrect', 'neutral')
+              AND outcome_at IS NOT NULL AND outcome_at >= ?
+            ORDER BY outcome_at DESC
+        """, (symbol, cutoff)).fetchall()
+    data = [dict(r) for r in rows]
+    if not data:
+        return {
+            "symbol": symbol,
+            "sample_size": 0,
+            "avg_favorable_pct": None,
+            "avg_adverse_pct": None,
+            "timeout_rate": 0.0,
+            "ambiguous_rate": 0.0,
+        }
+    mfe = [r["max_favorable_pct"] for r in data if r["max_favorable_pct"] is not None]
+    mae = [abs(r["max_adverse_pct"]) for r in data if r["max_adverse_pct"] is not None]
+    timeout_count = sum(1 for r in data if r.get("resolution_reason") == "timeout_no_hit")
+    ambiguous_count = sum(1 for r in data if r.get("resolution_reason") == "both_hit_same_candle")
+    total = len(data)
+    return {
+        "symbol": symbol,
+        "sample_size": total,
+        "avg_favorable_pct": round(sum(mfe) / len(mfe), 2) if mfe else None,
+        "avg_adverse_pct": round(sum(mae) / len(mae), 2) if mae else None,
+        "timeout_rate": round(timeout_count / total, 3) if total else 0.0,
+        "ambiguous_rate": round(ambiguous_count / total, 3) if total else 0.0,
+    }
 
 
 # ── Positions (per-user) ──────────────────────────────────────────────────────
@@ -647,67 +735,119 @@ def get_ml_accuracy_stats() -> dict:
         }
 
 
-def get_ml_activity_log(limit: int = 40) -> dict:
+def get_ml_activity_log(limit: int = 40, symbol: str | None = None,
+                        days: int | None = None) -> dict:
     """
     Returns:
     - training_events: recent entries from ml_training_log
     - recent_outcomes: last N resolved signals (for outcome feed)
     - symbol_health: per-symbol accuracy trend and model age
     """
+    filters = []
+    params: list = []
+    outcome_filters = []
+    outcome_params: list = []
+    if symbol:
+        filters.append("symbol = ?")
+        params.append(symbol.upper())
+        outcome_filters.append("symbol = ?")
+        outcome_params.append(symbol.upper())
+    if days and days > 0:
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        filters.append("trained_at >= ?")
+        params.append(cutoff)
+        outcome_filters.append("outcome_at >= ?")
+        outcome_params.append(cutoff)
+    train_where = f"WHERE {' AND '.join(filters)}" if filters else ""
+    outcome_where = f"WHERE {' AND '.join(outcome_filters)}" if outcome_filters else ""
+
     with _conn() as conn:
         train_rows = conn.execute("""
             SELECT symbol, trained_at, train_samples, outcome_samples
-            FROM ml_training_log ORDER BY id DESC LIMIT ?
-        """, (limit,)).fetchall()
+            FROM ml_training_log
+            {train_where}
+            ORDER BY id DESC LIMIT ?
+        """.format(train_where=train_where), (*params, limit)).fetchall()
 
         outcome_rows = conn.execute("""
             SELECT symbol, action, strength, price, outcome, outcome_at,
-                   ai_confidence, reasons, sent_at
+                   ai_confidence, reasons, sent_at, resolution_reason,
+                   touched_tp, touched_sl, resolution_minutes,
+                   max_favorable_pct, max_adverse_pct
             FROM signals
             WHERE outcome IN ('correct', 'incorrect', 'neutral')
+            {extra_where}
             ORDER BY outcome_at DESC LIMIT 60
-        """).fetchall()
+        """.format(
+            extra_where=(" AND " + " AND ".join(outcome_filters)) if outcome_filters else ""
+        ), outcome_params).fetchall()
 
         # Per-symbol: last 10 resolved outcomes for accuracy trend
         sym_rows = conn.execute("""
-            SELECT symbol, outcome FROM signals
+            SELECT symbol, outcome, resolution_reason, touched_tp, touched_sl,
+                   resolution_minutes, max_favorable_pct, max_adverse_pct
+            FROM signals
             WHERE outcome IN ('correct', 'incorrect')
+            {extra_where}
             ORDER BY outcome_at DESC
-        """).fetchall()
+        """.format(
+            extra_where=(" AND " + " AND ".join(outcome_filters)) if outcome_filters else ""
+        ), outcome_params).fetchall()
 
         # Pending count per symbol
         pending_rows = conn.execute("""
             SELECT symbol, COUNT(*) AS cnt FROM signals
             WHERE outcome = 'pending'
+            {extra_where}
             GROUP BY symbol
-        """).fetchall()
+        """.format(
+            extra_where=(" AND symbol = ?" if symbol else "")
+        ), ([symbol.upper()] if symbol else [])).fetchall()
 
         # Last training per symbol
         last_train = conn.execute("""
             SELECT symbol, MAX(trained_at) AS last_trained,
                    MAX(outcome_samples) AS last_outcome_samples
-            FROM ml_training_log GROUP BY symbol
+            FROM ml_training_log
+            {train_where}
+            GROUP BY symbol
+        """.format(train_where=train_where), params).fetchall()
+
+        available_symbols_rows = conn.execute("""
+            SELECT DISTINCT symbol FROM signals ORDER BY symbol
         """).fetchall()
 
     # Build per-symbol health
-    sym_outcomes: dict[str, list[str]] = {}
+    sym_outcomes: dict[str, list[dict]] = {}
     for r in sym_rows:
-        sym_outcomes.setdefault(r["symbol"], []).append(r["outcome"])
+        sym_outcomes.setdefault(r["symbol"], []).append(dict(r))
 
     pending_map = {r["symbol"]: r["cnt"] for r in pending_rows}
     last_train_map = {r["symbol"]: dict(r) for r in last_train}
 
     symbol_health = {}
+    resolution_reason_counts: dict[str, int] = {}
     for sym, outcomes in sym_outcomes.items():
         last10 = outcomes[:10]
-        correct = last10.count("correct")
+        correct = sum(1 for o in last10 if o["outcome"] == "correct")
         recent_acc = round(correct / len(last10) * 100, 1)
-        all_correct = outcomes.count("correct")
+        all_correct = sum(1 for o in outcomes if o["outcome"] == "correct")
         all_acc = round(all_correct / len(outcomes) * 100, 1)
         trend = "improving" if len(last10) >= 5 and recent_acc > all_acc else (
             "declining" if len(last10) >= 5 and recent_acc < all_acc - 5 else "stable"
         )
         lt = last_train_map.get(sym, {})
+        recent_neutral_like = sum(
+            1 for o in last10 if o.get("resolution_reason") in ("both_hit_same_candle", "timeout_no_hit")
+        )
+        ambiguous_count = sum(1 for o in outcomes if o.get("resolution_reason") == "both_hit_same_candle")
+        timeout_count = sum(1 for o in outcomes if o.get("resolution_reason") == "timeout_no_hit")
+        resolution_samples = [o["resolution_minutes"] for o in outcomes if o.get("resolution_minutes") is not None]
+        mfe_samples = [o["max_favorable_pct"] for o in outcomes if o.get("max_favorable_pct") is not None]
+        mae_samples = [o["max_adverse_pct"] for o in outcomes if o.get("max_adverse_pct") is not None]
+        for o in outcomes:
+            reason = o.get("resolution_reason") or "unknown"
+            resolution_reason_counts[reason] = resolution_reason_counts.get(reason, 0) + 1
         symbol_health[sym] = {
             "recent_acc": recent_acc,
             "all_acc": all_acc,
@@ -717,7 +857,35 @@ def get_ml_activity_log(limit: int = 40) -> dict:
             "pending": pending_map.get(sym, 0),
             "last_trained": lt.get("last_trained"),
             "last_outcome_samples": lt.get("last_outcome_samples", 0),
+            "ambiguous_count": ambiguous_count,
+            "timeout_count": timeout_count,
+            "recent_unclear": recent_neutral_like,
+            "avg_resolution_minutes": (
+                round(sum(resolution_samples) / len(resolution_samples), 1)
+                if resolution_samples else None
+            ),
+            "avg_favorable_pct": (
+                round(sum(mfe_samples) / len(mfe_samples), 2)
+                if mfe_samples else None
+            ),
+            "avg_adverse_pct": (
+                round(sum(mae_samples) / len(mae_samples), 2)
+                if mae_samples else None
+            ),
         }
+
+    resolution_reason_breakdown = [
+        {"reason": reason, "count": count}
+        for reason, count in sorted(
+            resolution_reason_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+    ]
+    resolution_time_by_symbol = [
+        {"symbol": sym, "avg_resolution_minutes": data["avg_resolution_minutes"]}
+        for sym, data in sorted(symbol_health.items())
+        if data.get("avg_resolution_minutes") is not None
+    ]
 
     return {
         "training_events": [dict(r) for r in train_rows],
@@ -726,6 +894,19 @@ def get_ml_activity_log(limit: int = 40) -> dict:
             for r in outcome_rows
         ],
         "symbol_health": symbol_health,
+        "resolution_reason_breakdown": resolution_reason_breakdown,
+        "resolution_time_by_symbol": resolution_time_by_symbol,
+        "mfe_mae_by_symbol": [
+            {
+                "symbol": sym,
+                "avg_favorable_pct": data["avg_favorable_pct"],
+                "avg_adverse_pct": abs(data["avg_adverse_pct"]) if data["avg_adverse_pct"] is not None else None,
+            }
+            for sym, data in sorted(symbol_health.items())
+            if data.get("avg_favorable_pct") is not None or data.get("avg_adverse_pct") is not None
+        ],
+        "available_symbols": [r["symbol"] for r in available_symbols_rows],
+        "filters": {"symbol": symbol.upper() if symbol else "", "days": days or 0},
     }
 
 
