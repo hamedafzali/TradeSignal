@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -53,6 +54,8 @@ from database import (
     open_position,
     seed_symbols,
     set_user_pref,
+    start_training_job,
+    finish_training_job,
     subscribe_user,
     unsubscribe_user,
     update_outcome,
@@ -406,6 +409,22 @@ async def process_action_requests(context: ContextTypes.DEFAULT_TYPE) -> None:
                 if not ok:
                     raise RuntimeError(f"{symbol} retrain failed")
                 note = f"{symbol} retrained"
+            elif action == "run_bootstrap":
+                symbols_to_boot = [symbol] if symbol else _get_symbols()
+                if not symbols_to_boot:
+                    raise ValueError("no symbols to bootstrap")
+                job_id = start_training_job("bootstrap", total_symbols=len(symbols_to_boot))
+
+                def _run():
+                    try:
+                        from bootstrap import run_bootstrap
+                        run_bootstrap(symbols_to_boot, years=2, job_id=job_id)
+                    except Exception as exc:
+                        finish_training_job(job_id, status="failed", note=str(exc)[:200])
+                        logger.error(f"[bootstrap] Thread error: {exc}")
+
+                threading.Thread(target=_run, daemon=True, name="bootstrap").start()
+                note = f"bootstrap started in background (job_id={job_id})"
             else:
                 raise ValueError(f"unsupported action {action}")
             complete_action_request(req["id"], "completed", note)

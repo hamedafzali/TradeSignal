@@ -7,6 +7,8 @@ from database import (
     init_db, get_stats, get_recent_signals,
     get_ml_accuracy_stats, get_ml_activity_log,
     get_all_symbols_with_status, add_symbol, remove_symbol,
+    create_action_request, get_ops_snapshot,
+    get_running_training_job, get_recent_training_jobs,
 )
 
 app = Flask(__name__)
@@ -108,6 +110,16 @@ _HTML = """<!DOCTYPE html>
   .sug-warn  { border-color:#f8717140; background:#4a1a1a22; }
   .sug-ok    { border-color:#4ade8040; background:#1a4a2e22; }
   .sug-info  { border-color:#38bdf840; background:#1a2d3a22; }
+  .ops-card { background:#0f1117; border:1px solid #2a2d3a; border-radius:10px; padding:14px 16px; min-height:112px; }
+  .ops-label { color:#8b8fa8; font-size:.74rem; text-transform:uppercase; letter-spacing:.08em; }
+  .ops-value { color:#ffffff; font-size:1.4rem; font-weight:700; margin-top:4px; }
+  .ops-meta { color:#555; font-size:.75rem; margin-top:8px; line-height:1.5; }
+  .action-btn { width:100%; text-align:left; background:#0f1117; color:#e0e0e0; border:1px solid #2a2d3a; }
+  .action-btn:hover { background:#141824; color:#fff; border-color:#38bdf8; }
+  .status-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
+  .status-ok { background:#4ade80; }
+  .status-warn { background:#fbbf24; }
+  .status-bad { background:#f87171; }
 </style>
 </head>
 <body>
@@ -129,6 +141,13 @@ _HTML = """<!DOCTYPE html>
 
   <!-- ── OVERVIEW TAB ─────────────────────────────────────────────────── -->
   <div class="tab-pane fade show active" id="tab-overview">
+
+    <div class="row g-3 mb-4">
+      <div class="col-md-3"><div class="ops-card"><div class="ops-label">Signal Engine</div><div class="ops-value" id="ops-signal-status">—</div><div class="ops-meta" id="ops-last-signal">No signal activity yet</div></div></div>
+      <div class="col-md-3"><div class="ops-card"><div class="ops-label">Learning Engine</div><div class="ops-value" id="ops-learning-status">—</div><div class="ops-meta" id="ops-last-learning">No learning cycles yet</div></div></div>
+      <div class="col-md-3"><div class="ops-card"><div class="ops-label">Pending Work</div><div class="ops-value" id="ops-pending-work">—</div><div class="ops-meta" id="ops-pending-meta">No queued actions</div></div></div>
+      <div class="col-md-3"><div class="ops-card"><div class="ops-label">Coverage</div><div class="ops-value" id="ops-coverage">—</div><div class="ops-meta" id="ops-coverage-meta">No watched symbols yet</div></div></div>
+    </div>
 
     <div class="row g-3 mb-4">
       <div class="col-6 col-md-3"><div class="card p-3"><div class="card-title">Total Users</div><div class="stat-val" id="s-users">—</div></div></div>
@@ -173,6 +192,13 @@ _HTML = """<!DOCTYPE html>
   <div class="tab-pane fade" id="tab-ml">
 
     <div class="row g-3 mb-4">
+      <div class="col-6 col-md-3"><div class="ops-card"><div class="ops-label">Active Models</div><div class="ops-value" id="ml-active-models">—</div><div class="ops-meta">Configured symbols in the learning universe</div></div></div>
+      <div class="col-6 col-md-3"><div class="ops-card"><div class="ops-label">Trained Models</div><div class="ops-value" id="ml-trained-models">—</div><div class="ops-meta">Models with at least one successful training run</div></div></div>
+      <div class="col-6 col-md-3"><div class="ops-card"><div class="ops-label">AI Resolved Signals</div><div class="ops-value" id="ml-resolved-ai">—</div><div class="ops-meta">Resolved outcomes where AI contributed confidence</div></div></div>
+      <div class="col-6 col-md-3"><div class="ops-card"><div class="ops-label">Avg AI Accuracy</div><div class="ops-value" id="ml-avg-acc">—</div><div class="ops-meta">Cross-symbol mean of available AI accuracy</div></div></div>
+    </div>
+
+    <div class="row g-3 mb-4">
       <div class="col-12">
         <div class="card p-3">
           <h6 class="mb-3">AI Confidence vs Accuracy</h6>
@@ -214,12 +240,21 @@ _HTML = """<!DOCTYPE html>
       </div>
       <div class="col-md-6">
         <div class="card p-3">
+          <h6 class="mb-3">Training Runs by Symbol</h6>
+          <canvas id="chart-train-runs" height="200"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <div class="row g-3 mb-4">
+      <div class="col-md-6">
+        <div class="card p-3">
           <h6 class="mb-1">How Training Works</h6>
           <p class="small mt-2" style="color:#8b8fa8; line-height:1.7">
-            <strong style="color:#4ade80">Every 20 minutes</strong>, the bot checks each symbol for new resolved outcomes.<br>
+            <strong style="color:#4ade80">Every 10 minutes</strong>, the bot checks each symbol for new resolved outcomes.<br>
             As soon as <strong style="color:#fbbf24">3 new outcomes</strong> arrive since the last training run,
             the model retrains immediately — no waiting.<br>
-            As a fallback, it always retrains every <strong style="color:#38bdf8">6 hours</strong> even without new outcomes.<br>
+            As a fallback, it retrains every <strong style="color:#38bdf8">2 hours</strong> even without new outcomes.<br>
             <strong style="color:#fbbf24">Confirmed outcomes</strong> are injected back at
             <strong style="color:#a78bfa">3× weight</strong> so the model learns from its real mistakes.<br>
             <strong style="color:#38bdf8">Gradient Boosting</strong> runs two classifiers — one for BUY, one for SELL —
@@ -229,11 +264,81 @@ _HTML = """<!DOCTYPE html>
           </p>
         </div>
       </div>
+      <div class="col-md-6">
+        <div class="card p-3 h-100">
+          <h6 class="mb-3">Confidence Notes</h6>
+          <div style="color:#8b8fa8;font-size:.84rem;line-height:1.7">
+            AI confidence is a model probability, not a guarantee. If it looks low, the better fix is more resolved symbol-specific outcomes and better calibration, not artificially inflating the number.
+            <div class="mt-2" id="ml-confidence-note">Confidence details will appear once data is available.</div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
   <!-- ── LEARNING ACTIVITY TAB ───────────────────────────────────────── -->
   <div class="tab-pane fade" id="tab-activity">
+
+    <div class="row g-3 mb-4">
+      <div class="col-md-5">
+        <div class="card p-3 h-100">
+          <h6 class="mb-3">🎛 Action Center</h6>
+          <div class="row g-2">
+            <div class="col-md-6"><button class="btn action-btn" onclick="runAction('scan_now')">Scan Market Now</button></div>
+            <div class="col-md-6"><button class="btn action-btn" onclick="runAction('check_outcomes_now')">Check Outcomes Now</button></div>
+            <div class="col-md-6"><button class="btn action-btn" onclick="runAction('retrain_all')">Retrain All Models</button></div>
+            <div class="col-md-6"><button class="btn action-btn" style="border-color:#a78bfa40;color:#a78bfa" onclick="runAction('run_bootstrap')">🚀 Run Bootstrap</button></div>
+            <div class="col-12 d-flex gap-2">
+              <select id="action-symbol" class="form-control" style="max-width:200px">
+                <option value="">Pick symbol</option>
+              </select>
+              <button class="btn action-btn" onclick="runSymbolRetrain()">Retrain Symbol</button>
+            </div>
+          </div>
+          <div id="action-msg" class="small mt-3" style="min-height:1.2em;color:#8b8fa8"></div>
+        </div>
+      </div>
+      <div class="col-md-7">
+        <div class="card p-3 h-100">
+          <h6 class="mb-3">🛰 Operator Snapshot</h6>
+          <div id="ops-snapshot" style="font-size:.84rem;color:#8b8fa8;line-height:1.7"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Live bootstrap job progress -->
+    <div class="row g-3 mb-4" id="job-progress-row" style="display:none!important">
+      <div class="col-12">
+        <div class="card p-3" style="border-color:#a78bfa40;background:#1a1a2e">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <h6 class="mb-0" style="color:#a78bfa">⚙️ Training Job In Progress</h6>
+            <span id="job-status-badge" class="badge" style="background:#a78bfa22;color:#a78bfa">running</span>
+          </div>
+          <div id="job-progress-bar-wrap" class="mb-2">
+            <div class="progress" style="height:10px;background:#2a2d3a">
+              <div id="job-progress-bar" class="progress-bar" style="width:0%;background:#a78bfa;transition:width .4s"></div>
+            </div>
+          </div>
+          <div class="d-flex justify-content-between" style="font-size:.8rem">
+            <span id="job-progress-label" style="color:#a78bfa">Starting…</span>
+            <span id="job-progress-pct" style="color:#8b8fa8"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Recent training jobs -->
+    <div class="row g-3 mb-4">
+      <div class="col-12">
+        <div class="card p-3">
+          <div class="d-flex justify-content-between align-items-center mb-3">
+            <h6 class="mb-0">📦 Bootstrap & Training Job History</h6>
+            <button class="btn btn-sm" style="background:#1a2d3a;color:#38bdf8;border:1px solid #2a2d3a" onclick="refreshJobs()">↻ Refresh</button>
+          </div>
+          <div id="job-history"></div>
+        </div>
+      </div>
+    </div>
 
     <!-- Model health cards per symbol -->
     <div class="row g-3 mb-4">
@@ -372,7 +477,78 @@ Chart.defaults.plugins.tooltip.bodyColor = '#8b8fa8';
 Chart.defaults.plugins.tooltip.borderColor = '#2a2d3a';
 Chart.defaults.plugins.tooltip.borderWidth = 1;
 
-let dailyChart, symbolChart, bucketsChart, strengthChart, resolutionReasonsChart, resolutionTimeChart, mfeMaeChart;
+let dailyChart, symbolChart, bucketsChart, strengthChart, resolutionReasonsChart, resolutionTimeChart, mfeMaeChart, trainRunsChart;
+
+function statusChip(ok, warnText, badText) {
+  if (ok === 'ok') return `<span class="status-dot status-ok"></span>${warnText}`;
+  if (ok === 'warn') return `<span class="status-dot status-warn"></span>${badText}`;
+  return `<span class="status-dot status-bad"></span>${badText}`;
+}
+
+async function refreshOps() {
+  const ops = await fetch('/api/ops').then(r=>r.json());
+  const lastSignal = ops.last_signal;
+  const lastCycle = ops.last_cycle;
+  const signalHealthy = lastSignal ? ((Date.now() - new Date(lastSignal.sent_at+'Z')) / 3600000 < 24 ? 'ok' : 'warn') : 'bad';
+  const learningHealthy = lastCycle ? ((Date.now() - new Date(lastCycle.checked_at+'Z')) / 3600000 < 1 ? 'ok' : 'warn') : 'bad';
+  document.getElementById('ops-signal-status').innerHTML = statusChip(signalHealthy, 'Flowing', 'Idle');
+  document.getElementById('ops-learning-status').innerHTML = statusChip(learningHealthy, 'Checking', 'Stale');
+  document.getElementById('ops-pending-work').textContent = `${ops.pending_outcomes} / ${ops.pending_actions}`;
+  document.getElementById('ops-coverage').textContent = `${ops.active_symbol_count}`;
+  document.getElementById('ops-last-signal').textContent = lastSignal
+    ? `${lastSignal.symbol} ${lastSignal.action} · ${new Date(lastSignal.sent_at+'Z').toLocaleString()}`
+    : 'No signal activity yet';
+  document.getElementById('ops-last-learning').textContent = lastCycle
+    ? `${lastCycle.symbol} · ${lastCycle.retrained ? 'retrained' : 'checked'} · ${new Date(lastCycle.checked_at+'Z').toLocaleString()}`
+    : 'No learning cycles yet';
+  document.getElementById('ops-pending-meta').textContent = `${ops.pending_outcomes} pending outcomes · ${ops.pending_actions} queued actions`;
+  document.getElementById('ops-coverage-meta').textContent = `${ops.active_symbols.join(', ') || 'No watched symbols'}`;
+
+  const actionSelect = document.getElementById('action-symbol');
+  if (actionSelect && actionSelect.options.length <= 1) {
+    actionSelect.innerHTML = '<option value="">Pick symbol</option>' + ops.active_symbols.map(sym => `<option value="${sym}">${sym}</option>`).join('');
+  }
+  const snapshot = [];
+  if (ops.last_action) snapshot.push(`Last action: ${ops.last_action.action}${ops.last_action.symbol ? ' ' + ops.last_action.symbol : ''} (${ops.last_action.status})`);
+  if (ops.last_train) snapshot.push(`Last train: ${ops.last_train.symbol} at ${new Date(ops.last_train.trained_at+'Z').toLocaleString()}`);
+  if (ops.last_outcome) snapshot.push(`Last outcome: ${ops.last_outcome.symbol} ${ops.last_outcome.outcome} via ${ops.last_outcome.resolution_reason || 'n/a'}`);
+  snapshot.push(`Tracked symbols: ${ops.active_symbol_count}`);
+  document.getElementById('ops-snapshot').innerHTML = snapshot.map(s => `<div class="mb-2">${s}</div>`).join('');
+}
+
+async function runAction(action, symbol='') {
+  const msg = document.getElementById('action-msg');
+  msg.style.color = '#8b8fa8';
+  msg.textContent = 'Queueing action...';
+  const payload = {action};
+  if (symbol) payload.symbol = symbol;
+  const res = await fetch('/api/actions', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(payload),
+  }).then(r=>r.json());
+  if (res.ok) {
+    msg.style.color = '#4ade80';
+    msg.textContent = `${action} queued — bot picks up within 60s`;
+    refreshOps();
+    refreshActivity();
+    setTimeout(refreshJobs, 3000);
+  } else {
+    msg.style.color = '#f87171';
+    msg.textContent = res.error || 'Action failed';
+  }
+}
+
+function runSymbolRetrain() {
+  const symbol = document.getElementById('action-symbol').value;
+  if (!symbol) {
+    const msg = document.getElementById('action-msg');
+    msg.style.color = '#f87171';
+    msg.textContent = 'Choose a symbol first';
+    return;
+  }
+  runAction('retrain_symbol', symbol);
+}
 
 function badge(text, cls) {
   return `<span class="badge rounded-pill ${cls} px-2 py-1">${text}</span>`;
@@ -417,6 +593,7 @@ async function refreshOverview() {
   document.getElementById('s-today').textContent = stats.today_signals;
   document.getElementById('s-acc').textContent = stats.resolved > 0 ? stats.accuracy+'%' : 'N/A';
   document.getElementById('last-refresh').textContent = 'Updated '+new Date().toLocaleTimeString();
+  refreshOps();
 
   const days = stats.daily.map(d=>d.day.slice(5));
   const counts = stats.daily.map(d=>d.count);
@@ -471,6 +648,11 @@ async function refreshOverview() {
 // ── ML ────────────────────────────────────────────────────────────────────────
 async function refreshML() {
   const ml = await fetch('/api/ml-stats').then(r=>r.json());
+  const summary = ml.summary || {};
+  document.getElementById('ml-active-models').textContent = summary.active_symbol_count ?? '—';
+  document.getElementById('ml-trained-models').textContent = summary.trained_model_count ?? '—';
+  document.getElementById('ml-resolved-ai').textContent = summary.ai_resolved_signals ?? '—';
+  document.getElementById('ml-avg-acc').textContent = summary.avg_ai_accuracy !== null && summary.avg_ai_accuracy !== undefined ? `${summary.avg_ai_accuracy}%` : '—';
 
   // Confidence buckets bar chart
   const bLabels = ml.confidence_buckets.map(b=>b.label);
@@ -546,6 +728,26 @@ async function refreshML() {
     strengthChart.data.datasets[0].data=Object.values(bs);
     strengthChart.update();
   }
+
+  const runLabels = Object.keys(ml.per_symbol || {});
+  const runValues = runLabels.map(sym => ml.per_symbol[sym].train_runs || 0);
+  if (!trainRunsChart) {
+    trainRunsChart = new Chart(document.getElementById('chart-train-runs'), {
+      type:'bar',
+      data:{labels:runLabels, datasets:[{label:'Train runs', data:runValues, backgroundColor:'#a78bfa99', borderColor:'#a78bfa', borderWidth:1}]},
+      options:{plugins:{legend:{labels:{color:'#8b8fa8'}}},
+        scales:{x:{ticks:{color:'#8b8fa8'},grid:{color:'#2a2d3a'}},
+                y:{ticks:{color:'#8b8fa8'},grid:{color:'#2a2d3a'}}}}
+    });
+  } else {
+    trainRunsChart.data.labels = runLabels;
+    trainRunsChart.data.datasets[0].data = runValues;
+    trainRunsChart.update();
+  }
+  document.getElementById('ml-confidence-note').textContent =
+    (summary.ai_resolved_signals || 0) > 0
+      ? `Current AI threshold is 65%. Low-looking confidence usually means limited resolved training data, not necessarily a broken model.`
+      : 'No resolved AI-backed signals yet. Confidence quality improves after the bot accumulates validated outcomes.';
 }
 
 // ── Admin ─────────────────────────────────────────────────────────────────────
@@ -817,22 +1019,46 @@ async function refreshActivity() {
     ...trainEvents.map(e => ({kind:'train', at:e.trained_at, ...e})),
     ...cycleEvents.map(e => ({kind:'cycle', at:e.checked_at, ...e})),
   ].sort((a,b) => new Date(b.at+'Z') - new Date(a.at+'Z')).slice(0, 60);
+
+  const triggerLabels = {
+    bootstrap: {label:'🚀 bootstrap', color:'#a78bfa'},
+    outcomes:  {label:'⚡ outcomes triggered', color:'#a78bfa'},
+    time:      {label:'⏱ time-based', color:'#38bdf8'},
+    manual:    {label:'🖱 manual', color:'#fbbf24'},
+  };
+  function triggerChip(e) {
+    const t = e.trigger || (e.outcome_samples >= 3 ? 'outcomes' : 'time');
+    const cfg = triggerLabels[t] || {label: t, color:'#8b8fa8'};
+    return `<span style="color:${cfg.color}">${cfg.label}</span>`;
+  }
+  function winRateChip(wr) {
+    if (wr === null || wr === undefined) return '';
+    const color = wr >= 55 ? '#4ade80' : wr >= 50 ? '#fbbf24' : '#f87171';
+    return `&nbsp;·&nbsp;<span style="color:${color}">win ${wr}%</span>`;
+  }
+  function sampleBreakdown(e) {
+    if (!e.correct_count && !e.incorrect_count && !e.neutral_count) return '';
+    return `&nbsp;·&nbsp;<span style="color:#4ade80">${e.correct_count||0}✓</span>` +
+           `&nbsp;<span style="color:#f87171">${e.incorrect_count||0}✗</span>` +
+           `&nbsp;<span style="color:#fbbf24">${e.neutral_count||0}~</span>`;
+  }
+
   document.getElementById('train-log').innerHTML = learningEvents.length
     ? learningEvents.map(e => {
         if (e.kind === 'train') {
-          const cls = e.outcome_samples > 0 ? 'has-outcomes' : '';
-          const trigger = e.outcome_samples >= 3
-            ? `<span style="color:#a78bfa">⚡ ${e.outcome_samples} outcomes triggered</span>`
-            : `<span style="color:#38bdf8">⏱ time-based</span>`;
+          const cls = (e.outcome_samples > 0 || e.trigger === 'bootstrap') ? 'has-outcomes' : '';
           return `<div class="event-row ${cls}">
             <div class="d-flex justify-content-between">
               <strong style="color:#e0e0e0">${e.symbol}</strong>
               <span style="color:#555">${new Date(e.trained_at+'Z').toLocaleString()}</span>
             </div>
             <div class="mt-1">
-              <span style="color:#4ade80">🧠 retrained</span> &nbsp;·&nbsp; ${trigger} &nbsp;·&nbsp;
-              <span style="color:#8b8fa8">${e.train_samples} samples trained</span>
-              ${e.outcome_samples > 0 ? `&nbsp;·&nbsp;<span style="color:#fbbf24">${e.outcome_samples} real outcomes blended (3× weight)</span>` : ''}
+              <span style="color:#4ade80">🧠 retrained</span> &nbsp;·&nbsp;
+              ${triggerChip(e)}
+              ${winRateChip(e.win_rate)}
+              ${sampleBreakdown(e)}
+              &nbsp;·&nbsp;<span style="color:#8b8fa8">${e.train_samples} samples</span>
+              ${e.outcome_samples > 0 ? `&nbsp;·&nbsp;<span style="color:#fbbf24">${e.outcome_samples} real outcomes blended</span>` : ''}
             </div>
           </div>`;
         }
@@ -930,15 +1156,73 @@ async function refreshActivity() {
     : '<div class="suggestion-item sug-ok">✅ All models look healthy — no issues detected.</div>';
 }
 
+// ── Training jobs ─────────────────────────────────────────────────────────────
+let _jobPollTimer = null;
+
+async function refreshJobs() {
+  const data = await fetch('/api/training-jobs').then(r=>r.json());
+  const running = data.running;
+  const recent = data.recent || [];
+
+  // Live progress widget
+  const row = document.getElementById('job-progress-row');
+  if (running) {
+    row.style.display = '';
+    const pct = running.total_symbols > 0
+      ? Math.round(running.done_symbols / running.total_symbols * 100) : 0;
+    document.getElementById('job-progress-bar').style.width = pct + '%';
+    document.getElementById('job-progress-pct').textContent = `${running.done_symbols}/${running.total_symbols} symbols`;
+    const curSym = running.current_symbol ? ` — processing ${running.current_symbol}` : '';
+    document.getElementById('job-progress-label').textContent = `${running.job_type} running${curSym}`;
+    // Poll fast while running
+    if (!_jobPollTimer) {
+      _jobPollTimer = setInterval(refreshJobs, 5000);
+    }
+  } else {
+    row.style.display = 'none';
+    if (_jobPollTimer) { clearInterval(_jobPollTimer); _jobPollTimer = null; }
+  }
+
+  // Job history table
+  const jobColors = {done:'#4ade80', failed:'#f87171', running:'#a78bfa'};
+  document.getElementById('job-history').innerHTML = recent.length
+    ? recent.map(j => {
+        const color = jobColors[j.status] || '#8b8fa8';
+        const duration = j.completed_at && j.started_at
+          ? Math.round((new Date(j.completed_at+'Z') - new Date(j.started_at+'Z')) / 1000)
+          : null;
+        let summary = '';
+        try {
+          const s = j.result_summary ? JSON.parse(j.result_summary) : null;
+          if (s) summary = ` &nbsp;·&nbsp; <span style="color:#e0e0e0">${s.trained}/${s.total} trained</span> &nbsp;·&nbsp; <span style="color:#fbbf24">avg win ${s.avg_win_rate}%</span>`;
+        } catch(e){}
+        return `<div class="event-row" style="border-left-color:${color}">
+          <div class="d-flex justify-content-between">
+            <span><span style="color:${color};font-weight:600">${j.job_type}</span>
+              &nbsp;<span style="color:#8b8fa8">${j.done_symbols}/${j.total_symbols} symbols</span>
+              ${summary}
+            </span>
+            <span style="color:#555;font-size:.75rem">${new Date(j.started_at+'Z').toLocaleString()}</span>
+          </div>
+          <div style="color:#555;margin-top:3px;font-size:.75rem">
+            ${j.note || ''}
+            ${duration !== null ? `&nbsp;·&nbsp;${duration}s` : ''}
+          </div>
+        </div>`;
+      }).join('')
+    : '<div style="color:#555;font-size:.85rem">No training jobs run yet. Click "Run Bootstrap" to pre-train models from 2 years of historical data.</div>';
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 refreshOverview();
 setInterval(refreshOverview, 30000);
+setInterval(refreshOps, 30000);
 
 document.querySelectorAll('[data-bs-target="#tab-ml"]').forEach(el =>
   el.addEventListener('shown.bs.tab', () => refreshML())
 );
 document.querySelectorAll('[data-bs-target="#tab-activity"]').forEach(el =>
-  el.addEventListener('shown.bs.tab', () => refreshActivity())
+  el.addEventListener('shown.bs.tab', () => { refreshActivity(); refreshJobs(); })
 );
 document.querySelectorAll('[data-bs-target="#tab-admin"]').forEach(el =>
   el.addEventListener('shown.bs.tab', () => refreshAdmin())
@@ -978,6 +1262,25 @@ def api_ml_activity():
     except ValueError:
         days = None
     return jsonify(get_ml_activity_log(symbol=symbol, days=days))
+
+
+@app.route("/api/ops")
+def api_ops():
+    return jsonify(get_ops_snapshot())
+
+
+@app.route("/api/actions", methods=["POST"])
+def api_actions():
+    data = request.get_json(force=True)
+    action = (data.get("action") or "").strip()
+    symbol = (data.get("symbol") or "").strip().upper() or None
+    allowed = {"scan_now", "check_outcomes_now", "retrain_all", "retrain_symbol", "run_bootstrap"}
+    if action not in allowed:
+        return jsonify({"ok": False, "error": "Unsupported action"}), 400
+    if action == "retrain_symbol" and not symbol:
+        return jsonify({"ok": False, "error": "Symbol required"}), 400
+    create_action_request(action, symbol=symbol, requested_by="dashboard")
+    return jsonify({"ok": True})
 
 
 @app.route("/api/search")
@@ -1025,6 +1328,14 @@ def api_symbols_add():
     if added:
         return jsonify({"ok": True, "symbol": symbol})
     return jsonify({"ok": False, "error": f"{symbol} is already active"}), 409
+
+
+@app.route("/api/training-jobs")
+def api_training_jobs():
+    return jsonify({
+        "running": get_running_training_job(),
+        "recent": get_recent_training_jobs(10),
+    })
 
 
 @app.route("/api/symbols/<symbol>", methods=["DELETE"])

@@ -93,11 +93,30 @@ def init_db() -> None:
             );
 
             CREATE TABLE IF NOT EXISTS ml_training_log (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol       TEXT NOT NULL,
-                trained_at   TEXT NOT NULL,
-                train_samples INTEGER,
-                outcome_samples INTEGER DEFAULT 0
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol          TEXT NOT NULL,
+                trained_at      TEXT NOT NULL,
+                train_samples   INTEGER,
+                outcome_samples INTEGER DEFAULT 0,
+                trigger         TEXT DEFAULT 'time',
+                win_rate        REAL,
+                correct_count   INTEGER DEFAULT 0,
+                incorrect_count INTEGER DEFAULT 0,
+                neutral_count   INTEGER DEFAULT 0,
+                job_id          INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS ml_training_jobs (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_type        TEXT NOT NULL,
+                status          TEXT DEFAULT 'running',
+                started_at      TEXT NOT NULL,
+                completed_at    TEXT,
+                total_symbols   INTEGER DEFAULT 0,
+                done_symbols    INTEGER DEFAULT 0,
+                current_symbol  TEXT,
+                result_summary  TEXT,
+                note            TEXT
             );
 
             CREATE TABLE IF NOT EXISTS ml_cycle_log (
@@ -140,6 +159,18 @@ def init_db() -> None:
         for col, sql_type in signal_migrations.items():
             if col not in signal_cols:
                 conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {sql_type}")
+        train_cols = [r[1] for r in conn.execute("PRAGMA table_info(ml_training_log)").fetchall()]
+        train_migrations = {
+            "trigger": "TEXT DEFAULT 'time'",
+            "win_rate": "REAL",
+            "correct_count": "INTEGER DEFAULT 0",
+            "incorrect_count": "INTEGER DEFAULT 0",
+            "neutral_count": "INTEGER DEFAULT 0",
+            "job_id": "INTEGER",
+        }
+        for col, sql_type in train_migrations.items():
+            if col not in train_cols:
+                conn.execute(f"ALTER TABLE ml_training_log ADD COLUMN {col} {sql_type}")
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────
@@ -733,12 +764,65 @@ def get_all_symbols_with_status() -> list[dict]:
 
 # ── ML training log ───────────────────────────────────────────────────────────
 
-def log_training(symbol: str, train_samples: int, outcome_samples: int = 0) -> None:
+def log_training(symbol: str, train_samples: int, outcome_samples: int = 0,
+                 trigger: str = "time", win_rate: float | None = None,
+                 correct_count: int = 0, incorrect_count: int = 0,
+                 neutral_count: int = 0, job_id: int | None = None) -> None:
     with _conn() as conn:
         conn.execute("""
-            INSERT INTO ml_training_log (symbol, trained_at, train_samples, outcome_samples)
-            VALUES (?, ?, ?, ?)
-        """, (symbol, datetime.utcnow().isoformat(), train_samples, outcome_samples))
+            INSERT INTO ml_training_log
+                (symbol, trained_at, train_samples, outcome_samples,
+                 trigger, win_rate, correct_count, incorrect_count, neutral_count, job_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (symbol, datetime.utcnow().isoformat(), train_samples, outcome_samples,
+              trigger, win_rate, correct_count, incorrect_count, neutral_count, job_id))
+
+
+def start_training_job(job_type: str, total_symbols: int) -> int:
+    with _conn() as conn:
+        cur = conn.execute("""
+            INSERT INTO ml_training_jobs (job_type, status, started_at, total_symbols)
+            VALUES (?, 'running', ?, ?)
+        """, (job_type, datetime.utcnow().isoformat(), total_symbols))
+        return cur.lastrowid
+
+
+def update_training_job(job_id: int, done_symbols: int,
+                        current_symbol: str | None = None) -> None:
+    with _conn() as conn:
+        conn.execute("""
+            UPDATE ml_training_jobs
+            SET done_symbols = ?, current_symbol = ?
+            WHERE id = ?
+        """, (done_symbols, current_symbol, job_id))
+
+
+def finish_training_job(job_id: int, status: str = "done",
+                        result_summary: str | None = None, note: str = "") -> None:
+    with _conn() as conn:
+        conn.execute("""
+            UPDATE ml_training_jobs
+            SET status = ?, completed_at = ?, result_summary = ?, note = ?,
+                current_symbol = NULL
+            WHERE id = ?
+        """, (status, datetime.utcnow().isoformat(), result_summary, note, job_id))
+
+
+def get_running_training_job() -> dict | None:
+    with _conn() as conn:
+        row = conn.execute("""
+            SELECT * FROM ml_training_jobs WHERE status = 'running'
+            ORDER BY started_at DESC LIMIT 1
+        """).fetchone()
+        return dict(row) if row else None
+
+
+def get_recent_training_jobs(limit: int = 10) -> list[dict]:
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT * FROM ml_training_jobs ORDER BY id DESC LIMIT ?
+        """, (limit,)).fetchall()
+        return [dict(r) for r in rows]
 
 
 def log_learning_cycle(symbol: str, retrain_needed: bool, retrained: bool,
@@ -1094,6 +1178,8 @@ def get_ml_activity_log(limit: int = 40, symbol: str | None = None,
         ],
         "available_symbols": [r["symbol"] for r in available_symbols_rows],
         "filters": {"symbol": symbol.upper() if symbol else "", "days": days or 0},
+        "running_job": get_running_training_job(),
+        "recent_jobs": get_recent_training_jobs(5),
     }
 
 

@@ -147,51 +147,84 @@ def bootstrap_symbol(symbol: str, years: int = 2,
 
 
 def run_bootstrap(symbols: list[str], years: int = 2,
-                  min_samples: int = 10) -> dict[str, dict]:
+                  min_samples: int = 10,
+                  job_id: int | None = None) -> dict[str, dict]:
     from ml_signals import StockModel
-    from database import log_training, get_outcome_count
+    from database import (log_training, get_outcome_count,
+                          start_training_job, update_training_job,
+                          finish_training_job)
+    import json
+
+    if job_id is None:
+        job_id = start_training_job("bootstrap", total_symbols=len(symbols))
+        logger.info(f"[bootstrap] Started job_id={job_id} for {len(symbols)} symbols")
 
     results = {}
-    for symbol in symbols:
+    for idx, symbol in enumerate(symbols):
         logger.info(f"\n{'='*50}")
-        logger.info(f"[bootstrap] Processing {symbol}...")
+        logger.info(f"[bootstrap] Processing {symbol} ({idx+1}/{len(symbols)})...")
+        update_training_job(job_id, done_symbols=idx, current_symbol=symbol)
 
         samples = bootstrap_symbol(symbol, years=years)
         if len(samples) < min_samples:
             logger.warning(f"[bootstrap] {symbol}: only {len(samples)} samples, skipping train")
             results[symbol] = {"samples": len(samples), "trained": False, "reason": "too few samples"}
+            update_training_job(job_id, done_symbols=idx + 1, current_symbol=None)
             continue
 
-        # Keep only correct/incorrect for training (neutral adds noise)
+        correct = sum(1 for s in samples if s["outcome"] == "correct")
+        incorrect = sum(1 for s in samples if s["outcome"] == "incorrect")
+        neutral = sum(1 for s in samples if s["outcome"] == "neutral")
+        non_neutral = correct + incorrect
+        win_rate = round(correct / max(1, non_neutral) * 100, 1)
+
         training_samples = [s for s in samples if s["outcome"] != "neutral"]
         logger.info(f"[bootstrap] {symbol}: training on {len(training_samples)} non-neutral samples")
 
         model = StockModel(symbol)
         ok = model.train(outcome_data=training_samples)
 
+        if ok:
+            log_training(
+                symbol,
+                train_samples=len(training_samples),
+                outcome_samples=len(training_samples),
+                trigger="bootstrap",
+                win_rate=win_rate,
+                correct_count=correct,
+                incorrect_count=incorrect,
+                neutral_count=neutral,
+                job_id=job_id,
+            )
+
         results[symbol] = {
             "total_samples": len(samples),
             "training_samples": len(training_samples),
-            "correct": sum(1 for s in samples if s["outcome"] == "correct"),
-            "incorrect": sum(1 for s in samples if s["outcome"] == "incorrect"),
-            "neutral": sum(1 for s in samples if s["outcome"] == "neutral"),
-            "win_rate": round(
-                sum(1 for s in samples if s["outcome"] == "correct") /
-                max(1, sum(1 for s in samples if s["outcome"] != "neutral")) * 100, 1
-            ),
+            "correct": correct,
+            "incorrect": incorrect,
+            "neutral": neutral,
+            "win_rate": win_rate,
             "trained": ok,
         }
 
         if ok:
             logger.info(
                 f"[bootstrap] {symbol}: ✓ model trained  "
-                f"win_rate={results[symbol]['win_rate']}%  "
-                f"({results[symbol]['correct']} correct / "
-                f"{results[symbol]['incorrect']} incorrect)"
+                f"win_rate={win_rate}%  ({correct} correct / {incorrect} incorrect)"
             )
         else:
             logger.error(f"[bootstrap] {symbol}: ✗ training failed")
 
+        update_training_job(job_id, done_symbols=idx + 1, current_symbol=None)
+
+    trained_count = sum(1 for r in results.values() if r.get("trained"))
+    avg_wr = round(
+        sum(r["win_rate"] for r in results.values() if r.get("trained")) / max(1, trained_count), 1
+    ) if trained_count else 0.0
+    summary = json.dumps({"trained": trained_count, "total": len(symbols), "avg_win_rate": avg_wr})
+    finish_training_job(job_id, status="done", result_summary=summary,
+                        note=f"{trained_count}/{len(symbols)} trained, avg win rate {avg_wr}%")
+    logger.info(f"[bootstrap] Job {job_id} complete — {trained_count}/{len(symbols)} trained")
     return results
 
 

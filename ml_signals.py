@@ -174,7 +174,8 @@ class StockModel:
             # Persist to DB for dashboard reporting
             try:
                 from database import log_training
-                log_training(self.symbol, len(X), self.outcome_samples)
+                trigger = "outcomes" if (outcome_data and len(outcome_data) >= 3) else "time"
+                log_training(self.symbol, len(X), self.outcome_samples, trigger=trigger)
             except Exception:
                 pass
 
