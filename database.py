@@ -140,6 +140,21 @@ def init_db() -> None:
                 result_note   TEXT,
                 completed_at  TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sentiment_cache (
+                symbol       TEXT PRIMARY KEY,
+                score        REAL DEFAULT 0.0,
+                label        TEXT DEFAULT 'neutral',
+                source       TEXT DEFAULT 'disabled',
+                headlines    TEXT DEFAULT '[]',
+                computed_at  TEXT NOT NULL
+            );
         """)
         # Migrate existing positions table if tp/sl columns missing
         cols = [r[1] for r in conn.execute("PRAGMA table_info(positions)").fetchall()]
@@ -1181,6 +1196,97 @@ def get_ml_activity_log(limit: int = 40, symbol: str | None = None,
         "running_job": get_running_training_job(),
         "recent_jobs": get_recent_training_jobs(5),
     }
+
+
+# ── App settings ──────────────────────────────────────────────────────────────
+
+_SETTING_DEFAULTS = {
+    "sentiment_provider": "disabled",          # disabled / local_finbert / claude
+    "sentiment_local_url": "http://finbert:5001",
+    "claude_api_key": "",
+    "sentiment_suppress_threshold": "0.35",
+    "news_provider": "disabled",               # disabled / finnhub
+    "finnhub_api_key": "",
+    "news_lookback_hours": "6",
+}
+
+
+def get_setting(key: str, default: str = "") -> str:
+    fallback = _SETTING_DEFAULTS.get(key, default)
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT value FROM app_settings WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else fallback
+
+
+def set_setting(key: str, value: str) -> None:
+    now = datetime.utcnow().isoformat()
+    with _conn() as conn:
+        conn.execute("""
+            INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = ?
+        """, (key, value, now, value, now))
+
+
+def get_all_settings() -> dict[str, str]:
+    with _conn() as conn:
+        rows = conn.execute("SELECT key, value FROM app_settings").fetchall()
+        stored = {r["key"]: r["value"] for r in rows}
+    return {k: stored.get(k, v) for k, v in _SETTING_DEFAULTS.items()}
+
+
+# ── Sentiment cache ───────────────────────────────────────────────────────────
+
+def set_sentiment_cache(symbol: str, result: dict) -> None:
+    now = datetime.utcnow().isoformat()
+    with _conn() as conn:
+        conn.execute("""
+            INSERT INTO sentiment_cache (symbol, score, label, source, headlines, computed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(symbol) DO UPDATE SET
+                score = ?, label = ?, source = ?, headlines = ?, computed_at = ?
+        """, (
+            symbol.upper(),
+            result.get("score", 0.0),
+            result.get("label", "neutral"),
+            result.get("source", "disabled"),
+            json.dumps(result.get("headlines", [])),
+            now,
+            result.get("score", 0.0),
+            result.get("label", "neutral"),
+            result.get("source", "disabled"),
+            json.dumps(result.get("headlines", [])),
+            now,
+        ))
+
+
+def get_sentiment_cache(symbol: str, max_age_minutes: int = 30) -> dict | None:
+    cutoff = (datetime.utcnow() - timedelta(minutes=max_age_minutes)).isoformat()
+    with _conn() as conn:
+        row = conn.execute("""
+            SELECT score, label, source, headlines, computed_at
+            FROM sentiment_cache
+            WHERE symbol = ? AND computed_at >= ?
+        """, (symbol.upper(), cutoff)).fetchone()
+    if not row:
+        return None
+    return {
+        "score": row["score"],
+        "label": row["label"],
+        "source": row["source"],
+        "headlines": json.loads(row["headlines"] or "[]"),
+        "computed_at": row["computed_at"],
+    }
+
+
+def get_all_sentiment_cache() -> list[dict]:
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT symbol, score, label, source, computed_at
+            FROM sentiment_cache ORDER BY symbol
+        """).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_recent_signals(limit: int = 50) -> list[dict]:

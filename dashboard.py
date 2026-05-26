@@ -9,6 +9,7 @@ from database import (
     get_all_symbols_with_status, add_symbol, remove_symbol,
     create_action_request, get_ops_snapshot,
     get_running_training_job, get_recent_training_jobs,
+    get_all_settings, set_setting, get_all_sentiment_cache,
 )
 
 app = Flask(__name__)
@@ -445,6 +446,88 @@ _HTML = """<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- AI Sentiment Settings -->
+    <div class="row g-3 mb-4">
+      <div class="col-12">
+        <div class="card p-3" style="border-color:#38bdf840">
+          <h6 class="mb-3">🧠 AI Sentiment Settings</h6>
+          <p class="small mb-3" style="color:#8b8fa8">
+            Switch provider without restarting the bot — changes take effect on the next scan.
+          </p>
+          <div class="row g-3" id="settings-form">
+
+            <div class="col-md-4">
+              <label class="small text-muted">Sentiment Provider</label>
+              <select id="set-sentiment_provider" class="form-control mt-1">
+                <option value="disabled">Disabled (no sentiment)</option>
+                <option value="local_finbert">Local FinBERT (Docker sidecar)</option>
+                <option value="claude">Claude API (cloud)</option>
+              </select>
+              <div class="small mt-1" style="color:#555">
+                Switch to Claude when moving to a stronger host
+              </div>
+            </div>
+
+            <div class="col-md-4">
+              <label class="small text-muted">News Provider</label>
+              <select id="set-news_provider" class="form-control mt-1">
+                <option value="disabled">Disabled</option>
+                <option value="finnhub">Finnhub (free tier)</option>
+              </select>
+            </div>
+
+            <div class="col-md-4">
+              <label class="small text-muted">Suppress Threshold (0.0–1.0)</label>
+              <input type="number" id="set-sentiment_suppress_threshold" class="form-control mt-1"
+                step="0.05" min="0" max="1" placeholder="0.35">
+              <div class="small mt-1" style="color:#555">
+                Sentiment score above this suppresses conflicting signal
+              </div>
+            </div>
+
+            <div class="col-md-4">
+              <label class="small text-muted">Finnhub API Key</label>
+              <input type="text" id="set-finnhub_api_key" class="form-control mt-1"
+                placeholder="Free key from finnhub.io">
+            </div>
+
+            <div class="col-md-4">
+              <label class="small text-muted">Claude API Key</label>
+              <input type="password" id="set-claude_api_key" class="form-control mt-1"
+                placeholder="sk-ant-... (for claude provider)">
+            </div>
+
+            <div class="col-md-4">
+              <label class="small text-muted">FinBERT Service URL</label>
+              <input type="text" id="set-sentiment_local_url" class="form-control mt-1"
+                placeholder="http://finbert:5001">
+              <div class="small mt-1" style="color:#555">
+                Change this when deploying to a different host
+              </div>
+            </div>
+
+            <div class="col-md-4">
+              <label class="small text-muted">News Lookback (hours)</label>
+              <input type="number" id="set-news_lookback_hours" class="form-control mt-1"
+                step="1" min="1" max="48" placeholder="6">
+            </div>
+
+          </div>
+          <div class="d-flex gap-3 align-items-center mt-3">
+            <button class="btn" style="background:#1a3a4a;color:#38bdf8;border:1px solid #38bdf840;padding:6px 20px"
+              onclick="saveSettings()">💾 Save Settings</button>
+            <div id="settings-msg" class="small" style="color:#8b8fa8"></div>
+          </div>
+
+          <!-- Per-symbol sentiment status -->
+          <div class="mt-4">
+            <h6 class="mb-2" style="font-size:.85rem;color:#8b8fa8">Current Sentiment Cache</h6>
+            <div id="sentiment-status" style="font-size:.8rem"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="row g-3 mb-4">
       <div class="col-md-6">
         <div class="card p-3">
@@ -769,6 +852,56 @@ async function refreshML() {
 }
 
 // ── Admin ─────────────────────────────────────────────────────────────────────
+// ── Settings ──────────────────────────────────────────────────────────────────
+async function loadSettings() {
+  const s = await fetch('/api/settings').then(r => r.json());
+  const keys = ['sentiment_provider','news_provider','sentiment_suppress_threshold',
+                 'finnhub_api_key','claude_api_key','sentiment_local_url','news_lookback_hours'];
+  for (const k of keys) {
+    const el = document.getElementById('set-' + k);
+    if (el && s[k] !== undefined) el.value = s[k];
+  }
+  // Load sentiment cache
+  const cache = await fetch('/api/sentiment').then(r => r.json());
+  const labelColor = {positive:'#4ade80', negative:'#f87171', neutral:'#fbbf24', disabled:'#555'};
+  document.getElementById('sentiment-status').innerHTML = cache.length
+    ? `<div class="d-flex flex-wrap gap-2">${cache.map(c => {
+        const color = labelColor[c.label] || '#8b8fa8';
+        const age = c.computed_at ? Math.round((Date.now() - new Date(c.computed_at+'Z')) / 60000) + 'm ago' : '—';
+        return `<div style="background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:4px 10px">
+          <span class="sym-tag">${c.symbol}</span>
+          <span style="color:${color};margin-left:6px">${c.label}</span>
+          <span style="color:#555;font-size:.72rem;margin-left:4px">${c.score > 0 ? '+' : ''}${(c.score||0).toFixed(2)} · ${age}</span>
+        </div>`;
+      }).join('')}</div>`
+    : '<span style="color:#555">No sentiment data yet — enable a provider and wait for next refresh cycle.</span>';
+}
+
+async function saveSettings() {
+  const msg = document.getElementById('settings-msg');
+  msg.style.color = '#8b8fa8';
+  msg.textContent = 'Saving…';
+  const keys = ['sentiment_provider','news_provider','sentiment_suppress_threshold',
+                 'finnhub_api_key','claude_api_key','sentiment_local_url','news_lookback_hours'];
+  const payload = {};
+  for (const k of keys) {
+    const el = document.getElementById('set-' + k);
+    if (el) payload[k] = el.value;
+  }
+  const res = await fetch('/api/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload),
+  }).then(r => r.json());
+  if (res.ok) {
+    msg.style.color = '#4ade80';
+    msg.textContent = '✓ Saved — takes effect on next scan (no restart needed)';
+  } else {
+    msg.style.color = '#f87171';
+    msg.textContent = res.error || 'Save failed';
+  }
+}
+
 async function adminBootstrap() {
   const msg = document.getElementById('bootstrap-msg');
   msg.style.color = '#8b8fa8';
@@ -1262,7 +1395,7 @@ document.querySelectorAll('[data-bs-target="#tab-activity"]').forEach(el =>
   el.addEventListener('shown.bs.tab', () => { refreshActivity(); refreshJobs(); })
 );
 document.querySelectorAll('[data-bs-target="#tab-admin"]').forEach(el =>
-  el.addEventListener('shown.bs.tab', () => refreshAdmin())
+  el.addEventListener('shown.bs.tab', () => { refreshAdmin(); loadSettings(); })
 );
 </script>
 </body>
@@ -1365,6 +1498,30 @@ def api_symbols_add():
     if added:
         return jsonify({"ok": True, "symbol": symbol})
     return jsonify({"ok": False, "error": f"{symbol} is already active"}), 409
+
+
+@app.route("/api/settings", methods=["GET"])
+def api_settings_get():
+    return jsonify(get_all_settings())
+
+
+@app.route("/api/settings", methods=["POST"])
+def api_settings_post():
+    data = request.get_json(force=True)
+    allowed_keys = {
+        "sentiment_provider", "sentiment_local_url", "claude_api_key",
+        "sentiment_suppress_threshold", "news_provider", "finnhub_api_key",
+        "news_lookback_hours",
+    }
+    for key, value in data.items():
+        if key in allowed_keys:
+            set_setting(key, str(value).strip())
+    return jsonify({"ok": True})
+
+
+@app.route("/api/sentiment")
+def api_sentiment():
+    return jsonify(get_all_sentiment_cache())
 
 
 @app.route("/api/training-jobs")

@@ -61,6 +61,7 @@ from database import (
     update_outcome,
 )
 from ml_signals import StockModel, build_features
+from sentiment import get_sentiment, should_suppress, refresh_cache as refresh_sentiment
 from signals import (
     _atr, _macd, _rsi,
     combine_signals,
@@ -313,6 +314,19 @@ async def check_outcomes(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ── Continuous learning ───────────────────────────────────────────────────────
 
+async def refresh_sentiment_cache(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Refresh news sentiment for all symbols every 30 min. Never blocks scan."""
+    from database import get_setting
+    if get_setting("sentiment_provider", "disabled") == "disabled":
+        return
+    symbols = _get_symbols()
+    for symbol in symbols:
+        try:
+            refresh_sentiment(symbol)
+        except Exception as e:
+            logger.debug(f"[sentiment] refresh failed for {symbol}: {e}")
+
+
 async def continuous_learning(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Runs every 20 min. For each active symbol, checks whether new resolved
@@ -527,6 +541,19 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
 
             if get_last_signal_action(symbol, within_hours=6) == sig["action"]:
                 continue
+
+            # Sentiment filter — suppress if news strongly contradicts signal
+            sentiment = get_sentiment(symbol)
+            if should_suppress(sig["action"], sentiment):
+                logger.info(
+                    f"[sentiment] suppressed {sig['action']} {symbol} "
+                    f"(sentiment={sentiment['label']} score={sentiment['score']:.2f})"
+                )
+                continue
+            if sentiment.get("label") not in ("neutral", None) and sentiment.get("source") not in ("disabled", "cache_miss"):
+                sig.setdefault("reasons", []).append(
+                    f"News sentiment: {sentiment['label']} ({sentiment['score']:+.2f})"
+                )
 
             feat = _current_features(df_5m) if df_5m is not None else {}
             log_signal(sig, features=feat)
@@ -1504,6 +1531,8 @@ def main() -> None:
     app.job_queue.run_repeating(process_action_requests, interval=ACTION_QUEUE_INTERVAL, first=30)
     # Monitor open positions for TP/SL every 5 minutes
     app.job_queue.run_repeating(monitor_positions, interval=300, first=60)
+    # Refresh news sentiment cache every 30 minutes
+    app.job_queue.run_repeating(refresh_sentiment_cache, interval=1800, first=60)
     # Weekly recap: every Monday at 9:00 UTC
     app.job_queue.run_daily(weekly_recap, time=datetime.strptime("09:00", "%H:%M").time(),
                             days=(0,))  # 0 = Monday

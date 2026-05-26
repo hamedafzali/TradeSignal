@@ -31,6 +31,21 @@ services:
       - app_data:/app/data
     restart: unless-stopped
 
+  # ── FinBERT sentiment sidecar ────────────────────────────────────────────────
+  # Enable in dashboard: Admin → AI Sentiment Settings → Provider: Local FinBERT
+  # First start downloads ~400MB model. Subsequent starts use the cached volume.
+  finbert:
+    build: ./sentiment_service
+    container_name: tradesignal-finbert
+    ports:
+      - "5001:5001"
+    volumes:
+      - finbert_cache:/root/.cache/huggingface
+    restart: unless-stopped
+    environment:
+      - PORT=5001
+
 volumes:
   app_data:
   model_cache:
+  finbert_cache:
