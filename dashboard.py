@@ -461,10 +461,11 @@ _HTML = """<!DOCTYPE html>
               <select id="set-sentiment_provider" class="form-control mt-1">
                 <option value="disabled">Disabled (no sentiment)</option>
                 <option value="local_finbert">Local FinBERT (Docker sidecar)</option>
+                <option value="gemini">Gemini 1.5 Flash (free tier)</option>
                 <option value="claude">Claude API (cloud)</option>
               </select>
               <div class="small mt-1" style="color:#555">
-                Switch to Claude when moving to a stronger host
+                Gemini: 1,500 free calls/day — switch without restart
               </div>
             </div>
 
@@ -489,6 +490,12 @@ _HTML = """<!DOCTYPE html>
               <label class="small text-muted">Finnhub API Key</label>
               <input type="text" id="set-finnhub_api_key" class="form-control mt-1"
                 placeholder="Free key from finnhub.io">
+            </div>
+
+            <div class="col-md-4">
+              <label class="small text-muted">Gemini API Key</label>
+              <input type="password" id="set-gemini_api_key" class="form-control mt-1"
+                placeholder="AIza... (Google AI Studio, free tier)">
             </div>
 
             <div class="col-md-4">
@@ -856,7 +863,7 @@ async function refreshML() {
 async function loadSettings() {
   const s = await fetch('/api/settings').then(r => r.json());
   const keys = ['sentiment_provider','news_provider','sentiment_suppress_threshold',
-                 'finnhub_api_key','claude_api_key','sentiment_local_url','news_lookback_hours'];
+                 'finnhub_api_key','gemini_api_key','claude_api_key','sentiment_local_url','news_lookback_hours'];
   for (const k of keys) {
     const el = document.getElementById('set-' + k);
     if (el && s[k] !== undefined) el.value = s[k];
@@ -882,7 +889,7 @@ async function saveSettings() {
   msg.style.color = '#8b8fa8';
   msg.textContent = 'Saving…';
   const keys = ['sentiment_provider','news_provider','sentiment_suppress_threshold',
-                 'finnhub_api_key','claude_api_key','sentiment_local_url','news_lookback_hours'];
+                 'finnhub_api_key','gemini_api_key','claude_api_key','sentiment_local_url','news_lookback_hours'];
   const payload = {};
   for (const k of keys) {
     const el = document.getElementById('set-' + k);
@@ -1509,7 +1516,7 @@ def api_settings_get():
 def api_settings_post():
     data = request.get_json(force=True)
     allowed_keys = {
-        "sentiment_provider", "sentiment_local_url", "claude_api_key",
+        "sentiment_provider", "sentiment_local_url", "claude_api_key", "gemini_api_key",
         "sentiment_suppress_threshold", "news_provider", "finnhub_api_key",
         "news_lookback_hours",
     }

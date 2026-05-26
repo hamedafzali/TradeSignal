@@ -1201,8 +1201,9 @@ def get_ml_activity_log(limit: int = 40, symbol: str | None = None,
 # ── App settings ──────────────────────────────────────────────────────────────
 
 _SETTING_DEFAULTS = {
-    "sentiment_provider": "disabled",          # disabled / local_finbert / claude
+    "sentiment_provider": "disabled",          # disabled / local_finbert / gemini / claude
     "sentiment_local_url": "http://finbert:5001",
+    "gemini_api_key": "",
     "claude_api_key": "",
     "sentiment_suppress_threshold": "0.35",
     "news_provider": "disabled",               # disabled / finnhub

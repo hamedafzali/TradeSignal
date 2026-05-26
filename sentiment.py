@@ -83,6 +83,48 @@ def _score_local_finbert(headlines: list[str]) -> dict:
         return _NEUTRAL.copy()
 
 
+def _score_gemini(headlines: list[str], symbol: str) -> dict:
+    api_key = _setting("gemini_api_key")
+    if not api_key:
+        return _NEUTRAL.copy()
+    try:
+        joined = "\n".join(f"- {h}" for h in headlines)
+        prompt = (
+            f"Analyze these news headlines for {symbol}. "
+            f"Reply with only a JSON object: {{\"score\": float from -1.0 to 1.0, "
+            f"\"label\": \"positive\" or \"negative\" or \"neutral\"}}\n\n"
+            f"Headlines:\n{joined}"
+        )
+        payload = json.dumps({
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"maxOutputTokens": 64, "temperature": 0.1},
+        }).encode()
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"gemini-1.5-flash:generateContent?key={api_key}"
+        )
+        req = urllib.request.Request(
+            url, data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        # Strip markdown code fences if present
+        text = text.replace("```json", "").replace("```", "").strip()
+        result = json.loads(text)
+        return {
+            "score": float(result.get("score", 0.0)),
+            "label": result.get("label", "neutral"),
+            "headlines": headlines,
+            "source": "gemini",
+        }
+    except Exception as e:
+        logger.warning(f"[sentiment] gemini error for {symbol}: {e}")
+        return _NEUTRAL.copy()
+
+
 def _score_claude(headlines: list[str], symbol: str) -> dict:
     api_key = _setting("claude_api_key")
     if not api_key:
@@ -137,6 +179,8 @@ def analyze(headlines: list[str], symbol: str = "") -> dict:
 
     if provider == "local_finbert":
         result = _score_local_finbert(headlines)
+    elif provider == "gemini":
+        result = _score_gemini(headlines, symbol)
     elif provider == "claude":
         result = _score_claude(headlines, symbol)
     else:
