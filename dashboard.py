@@ -610,14 +610,15 @@ async function refreshOps() {
   const signalHealthy = lastSignal ? ((Date.now() - new Date(lastSignal.sent_at+'Z')) / 3600000 < 24 ? 'ok' : 'warn') : 'bad';
   const learningHealthy = lastCycle ? ((Date.now() - new Date(lastCycle.checked_at+'Z')) / 3600000 < 1 ? 'ok' : 'warn') : 'bad';
   document.getElementById('ops-signal-status').innerHTML = statusChip(signalHealthy, 'Flowing', 'Idle');
-  document.getElementById('ops-learning-status').innerHTML = statusChip(learningHealthy, 'Checking', 'Stale');
+  const learningLabel = lastCycle?.retrained ? 'Retrained' : 'Monitoring';
+  document.getElementById('ops-learning-status').innerHTML = statusChip(learningHealthy, learningLabel, 'Stale');
   document.getElementById('ops-pending-work').textContent = `${ops.pending_outcomes} / ${ops.pending_actions}`;
   document.getElementById('ops-coverage').textContent = `${ops.active_symbol_count}`;
   document.getElementById('ops-last-signal').textContent = lastSignal
     ? `${lastSignal.symbol} ${lastSignal.action} · ${new Date(lastSignal.sent_at+'Z').toLocaleString()}`
     : 'No signal activity yet';
   document.getElementById('ops-last-learning').textContent = lastCycle
-    ? `${lastCycle.symbol} · ${lastCycle.retrained ? 'retrained' : 'checked'} · ${new Date(lastCycle.checked_at+'Z').toLocaleString()}`
+    ? `${lastCycle.symbol} · ${lastCycle.retrained ? '🧠 retrained' : 'checked'} · ${new Date(lastCycle.checked_at+'Z').toLocaleString()}`
     : 'No learning cycles yet';
   document.getElementById('ops-pending-meta').textContent = `${ops.pending_outcomes} pending outcomes · ${ops.pending_actions} queued actions`;
   document.getElementById('ops-coverage-meta').textContent = `${ops.active_symbols.join(', ') || 'No watched symbols'}`;
