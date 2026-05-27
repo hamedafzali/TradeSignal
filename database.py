@@ -596,12 +596,13 @@ def get_stats() -> dict:
         today_signals = conn.execute(
             "SELECT COUNT(*) FROM signals WHERE sent_at LIKE ?", (f"{today}%",)
         ).fetchone()[0]
-        resolved = conn.execute(
-            "SELECT COUNT(*) FROM signals WHERE outcome != 'pending'"
-        ).fetchone()[0]
         correct = conn.execute(
             "SELECT COUNT(*) FROM signals WHERE outcome = 'correct'"
         ).fetchone()[0]
+        incorrect = conn.execute(
+            "SELECT COUNT(*) FROM signals WHERE outcome = 'incorrect'"
+        ).fetchone()[0]
+        resolved = correct + incorrect  # exclude neutral from accuracy denominator
         accuracy = round(correct / resolved * 100, 1) if resolved > 0 else 0
 
         symbol_rows = conn.execute("""
@@ -609,15 +610,17 @@ def get_stats() -> dict:
                    COUNT(*) AS total,
                    SUM(CASE WHEN outcome='correct'   THEN 1 ELSE 0 END) AS correct,
                    SUM(CASE WHEN outcome='incorrect' THEN 1 ELSE 0 END) AS incorrect,
-                   SUM(CASE WHEN outcome!='pending'  THEN 1 ELSE 0 END) AS resolved
+                   SUM(CASE WHEN outcome='neutral'   THEN 1 ELSE 0 END) AS neutral
             FROM signals GROUP BY symbol
         """).fetchall()
         per_symbol = {}
         for r in symbol_rows:
-            acc = round(r["correct"] / r["resolved"] * 100, 1) if r["resolved"] > 0 else 0
+            decisive = r["correct"] + r["incorrect"]
+            acc = round(r["correct"] / decisive * 100, 1) if decisive > 0 else 0
             per_symbol[r["symbol"]] = {
                 "total": r["total"], "correct": r["correct"],
-                "incorrect": r["incorrect"], "accuracy": acc,
+                "incorrect": r["incorrect"], "neutral": r["neutral"],
+                "accuracy": acc, "resolved": decisive,
             }
 
         daily_rows = conn.execute("""
@@ -663,19 +666,20 @@ def get_weekly_stats() -> dict:
                    COUNT(*) AS total,
                    SUM(CASE WHEN outcome='correct'   THEN 1 ELSE 0 END) AS correct,
                    SUM(CASE WHEN outcome='incorrect' THEN 1 ELSE 0 END) AS incorrect,
-                   SUM(CASE WHEN outcome!='pending'  THEN 1 ELSE 0 END) AS resolved
+                   SUM(CASE WHEN outcome='neutral'   THEN 1 ELSE 0 END) AS neutral
             FROM signals WHERE sent_at >= ?
             GROUP BY symbol, action
         """, (cutoff,)).fetchall()
         total = conn.execute(
             "SELECT COUNT(*) FROM signals WHERE sent_at >= ?", (cutoff,)
         ).fetchone()[0]
-        resolved_total = conn.execute(
-            "SELECT COUNT(*) FROM signals WHERE outcome != 'pending' AND sent_at >= ?", (cutoff,)
-        ).fetchone()[0]
         correct_total = conn.execute(
             "SELECT COUNT(*) FROM signals WHERE outcome = 'correct' AND sent_at >= ?", (cutoff,)
         ).fetchone()[0]
+        incorrect_total = conn.execute(
+            "SELECT COUNT(*) FROM signals WHERE outcome = 'incorrect' AND sent_at >= ?", (cutoff,)
+        ).fetchone()[0]
+        resolved_total = correct_total + incorrect_total
     accuracy = round(correct_total / resolved_total * 100, 1) if resolved_total > 0 else 0
     per_symbol = {}
     for r in rows:
