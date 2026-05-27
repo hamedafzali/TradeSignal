@@ -701,19 +701,11 @@ async function refreshOps() {
   const lastCycle = ops.last_cycle;
   const signalHealthy = lastSignal ? ((Date.now() - new Date(lastSignal.sent_at+'Z')) / 3600000 < 24 ? 'ok' : 'warn') : 'bad';
   const learningHealthy = lastCycle ? ((Date.now() - new Date(lastCycle.checked_at+'Z')) / 3600000 < 1 ? 'ok' : 'warn') : 'bad';
-  document.getElementById('ops-signal-status').innerHTML = statusChip(signalHealthy, 'Flowing', 'Idle');
+  document.getElementById('ops-signal-status').innerHTML = statusChip(signalHealthy, 'Signals Flowing', 'Signals Idle');
   const learningLabel = lastCycle?.retrained ? 'Retrained' : 'Monitoring';
-  document.getElementById('ops-learning-status').innerHTML = statusChip(learningHealthy, learningLabel, 'Stale');
+  document.getElementById('ops-learning-status').innerHTML = statusChip(learningHealthy, learningLabel, 'Learning Stale');
   document.getElementById('ops-pending-work').textContent = `${ops.pending_outcomes} / ${ops.pending_actions}`;
   document.getElementById('ops-coverage').textContent = `${ops.active_symbol_count}`;
-  document.getElementById('ops-last-signal').textContent = lastSignal
-    ? `${lastSignal.symbol} ${lastSignal.action} · ${new Date(lastSignal.sent_at+'Z').toLocaleString()}`
-    : 'No signal activity yet';
-  document.getElementById('ops-last-learning').textContent = lastCycle
-    ? `${lastCycle.symbol} · ${lastCycle.retrained ? '🧠 retrained' : 'checked'} · ${new Date(lastCycle.checked_at+'Z').toLocaleString()}`
-    : 'No learning cycles yet';
-  document.getElementById('ops-pending-meta').textContent = `${ops.pending_outcomes} pending outcomes · ${ops.pending_actions} queued actions`;
-  document.getElementById('ops-coverage-meta').textContent = `${ops.active_symbols.join(', ') || 'No watched symbols'}`;
 
   const actionSelect = document.getElementById('action-symbol');
   if (actionSelect && actionSelect.options.length <= 1) {
@@ -724,7 +716,8 @@ async function refreshOps() {
   if (ops.last_train) snapshot.push(`Last train: ${ops.last_train.symbol} at ${new Date(ops.last_train.trained_at+'Z').toLocaleString()}`);
   if (ops.last_outcome) snapshot.push(`Last outcome: ${ops.last_outcome.symbol} ${ops.last_outcome.outcome} via ${ops.last_outcome.resolution_reason || 'n/a'}`);
   snapshot.push(`Tracked symbols: ${ops.active_symbol_count}`);
-  document.getElementById('ops-snapshot').innerHTML = snapshot.map(s => `<div class="mb-2">${s}</div>`).join('');
+  const snapEl = document.getElementById('ops-snapshot');
+  if (snapEl) snapEl.innerHTML = snapshot.map(s => `<div class="mb-2">${s}</div>`).join('');
 }
 
 async function runAction(action, symbol='') {
