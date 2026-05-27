@@ -351,9 +351,6 @@ def _signal_beginner(sig: dict, lang: str, action_emoji: str) -> str:
     ql = _quality_label(quality, lang)
     rrl = _rr_label(rr, lang)
 
-    tp_abs = abs(tp_pct)
-    sl_abs = abs(sl_pct)
-
     if lang == "fa":
         action_word = "خرید" if action == "BUY" else "فروش"
         entry_label = "قیمت خرید" if action == "BUY" else "قیمت فروش"
@@ -367,8 +364,8 @@ def _signal_beginner(sig: dict, lang: str, action_emoji: str) -> str:
             f"{action_emoji} *سیگنال {action_word} — {symbol}*\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"💰 {entry_label}:    `${price:.2f}`\n"
-            f"🎯 هدف قیمتی:    `${tp:.2f}`  *(سود +{tp_abs:.1f}٪)*\n"
-            f"🛑 حد ضرر:       `${sl:.2f}`  *(ضرر {sl_abs:.1f}٪)*\n"
+            f"🎯 هدف قیمتی:    `${tp:.2f}`  *(سود +{tp_pct:.1f}٪)*\n"
+            f"🛑 حد ضرر:       `${sl:.2f}`  *(ضرر {sl_pct:.1f}٪)*\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"⚖️ نسبت سود به ریسک: {rrl}\n"
             f"⭐ قدرت سیگنال: {stars} *{ql}*\n"
@@ -389,8 +386,8 @@ def _signal_beginner(sig: dict, lang: str, action_emoji: str) -> str:
             f"{action_emoji} *{action_word} Signal — {symbol}*\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"💰 {entry_label}    `${price:.2f}`\n"
-            f"🎯 Target:    `${tp:.2f}`  *(profit +{tp_abs:.1f}%)*\n"
-            f"🛑 Stop loss: `${sl:.2f}`  *(max loss {sl_abs:.1f}%)*\n"
+            f"🎯 Target:    `${tp:.2f}`  *(profit +{tp_pct:.1f}%)*\n"
+            f"🛑 Stop loss: `${sl:.2f}`  *(max loss {sl_pct:.1f}%)*\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"⚖️ Risk/Reward: {rrl}\n"
             f"⭐ Signal strength: {stars} *{ql}*\n"
@@ -430,8 +427,8 @@ def _signal_expert(sig: dict, lang: str, action_emoji: str) -> str:
         ind_parts.append("Vol 🔥")
     ind_line = "  ·  ".join(ind_parts) if ind_parts else "AI pattern"
 
-    tp_sign  = "+" if tp_pct >= 0 else ""
-    sl_sign  = "+" if sl_pct >= 0 else ""
+    tp_sign  = "+"
+    sl_sign  = "-"
     trend_lbl = _trend_label(trend, action, lang)
 
     if lang == "fa":

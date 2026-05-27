@@ -359,8 +359,9 @@ def signal_from_df(symbol: str, df: pd.DataFrame,
         is_buy = action == "BUY"
         tp = round(price + tp_dist if is_buy else price - tp_dist, 2)
         sl = round(price - sl_dist if is_buy else price + sl_dist, 2)
-        tp_pct = round((tp - price) / price * 100, 2)
-        sl_pct = round((sl - price) / price * 100, 2)
+        # Always positive: tp_pct = profit%, sl_pct = loss%
+        tp_pct = round(abs(tp - price) / price * 100, 2)
+        sl_pct = round(abs(sl - price) / price * 100, 2)
         return {
             "symbol": symbol, "action": action, "price": price,
             "tp": tp, "sl": sl, "tp_pct": tp_pct, "sl_pct": sl_pct, "rr": rr,
