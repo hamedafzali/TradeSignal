@@ -409,7 +409,7 @@ _HTML = """<!DOCTYPE html>
       <div class="col-12">
         <div class="card p-3" style="border-color:#a78bfa40;background:#1a1a2e">
           <div class="d-flex justify-content-between align-items-center mb-2">
-            <h6 class="mb-0" style="color:#a78bfa;font-size:.85rem">⚙️ Training Job In Progress</div>
+            <div class="section-head mb-0" style="color:#a78bfa">⚙️ Training Job In Progress</div>
             <span id="job-status-badge" class="badge" style="background:#a78bfa22;color:#a78bfa">running</span>
           </div>
           <div id="job-progress-bar-wrap" class="mb-2">
@@ -630,7 +630,7 @@ _HTML = """<!DOCTYPE html>
 
           <!-- Per-symbol sentiment status -->
           <div class="mt-4">
-            <h6 class="mb-2" style="font-size:.85rem;color:#8b8fa8">Current Sentiment Cache</div>
+            <div class="section-head" style="color:var(--muted)">Current Sentiment Cache</div>
             <div id="sentiment-status" style="font-size:.8rem"></div>
           </div>
         </div>
