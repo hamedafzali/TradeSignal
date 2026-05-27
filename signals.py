@@ -162,6 +162,16 @@ def _vol_spike(df: pd.DataFrame) -> bool:
     return current > avg * 1.5
 
 
+def _vol_sufficient(df: pd.DataFrame) -> bool:
+    """Hard gate: current bar volume must be >= 110% of 20-period average."""
+    vol = df["Volume"].squeeze()
+    if len(vol) < 20:
+        return True  # not enough history — don't block
+    avg = float(vol.rolling(20).mean().iloc[-1])
+    current = float(vol.iloc[-1])
+    return current >= avg * 1.1
+
+
 def _quality_score(rule_hits: int, ai_confidence: float | None,
                    trend: str, action: str, vol_spike: bool) -> int:
     score = rule_hits  # 0–3
@@ -257,8 +267,8 @@ def get_1h_bias(symbol: str) -> tuple[str | None, pd.DataFrame | None]:
         ema_bull  = float(ema9.iloc[-1]) > float(ema21.iloc[-1])
         ema_bear  = float(ema9.iloc[-1]) < float(ema21.iloc[-1])
 
-        buy_hits = [rsi_now < 45, macd_bull, ema_bull]
-        sell_hits = [rsi_now > 55, macd_bear, ema_bear]
+        buy_hits = [rsi_now < 40, macd_bull, ema_bull]
+        sell_hits = [rsi_now > 60, macd_bear, ema_bear]
 
         if sum(buy_hits) >= 2:
             return "BUY", df
@@ -287,8 +297,8 @@ def get_bias_from_df(df: pd.DataFrame) -> str | None:
     ema_bull = float(ema9.iloc[-1]) > float(ema21.iloc[-1])
     ema_bear = float(ema9.iloc[-1]) < float(ema21.iloc[-1])
 
-    buy_hits = [rsi_now < 45, macd_bull, ema_bull]
-    sell_hits = [rsi_now > 55, macd_bear, ema_bear]
+    buy_hits = [rsi_now < 40, macd_bull, ema_bull]
+    sell_hits = [rsi_now > 60, macd_bear, ema_bear]
 
     if sum(buy_hits) >= 2:
         return "BUY"
@@ -317,13 +327,14 @@ def signal_from_df(symbol: str, df: pd.DataFrame,
         return None
 
     has_vol_spike = _vol_spike(df)
+    has_vol = _vol_sufficient(df)
     macd_bull = float(macd_line.iloc[-1]) > float(signal_line.iloc[-1])
     macd_bear = float(macd_line.iloc[-1]) < float(signal_line.iloc[-1])
     ema_bull = float(ema9.iloc[-1]) > float(ema21.iloc[-1])
     ema_bear = float(ema9.iloc[-1]) < float(ema21.iloc[-1])
 
-    buy_hits = [rsi_now < 45, macd_bull, ema_bull]
-    sell_hits = [rsi_now > 55, macd_bear, ema_bear]
+    buy_hits = [rsi_now < 40, macd_bull, ema_bull]
+    sell_hits = [rsi_now > 60, macd_bear, ema_bear]
     trend = _trend(df_1h) if df_1h is not None and not df_1h.empty else "unknown"
 
     sl_mult, tp_mult, adaptive_note = _adaptive_tp_sl(price, atr_val, symbol)
@@ -332,28 +343,28 @@ def signal_from_df(symbol: str, df: pd.DataFrame,
     rr = round(tp_dist / sl_dist, 1) if sl_dist > 0 else 0
 
     reasons_buy = []
-    if rsi_now < 45:
+    if rsi_now < 40:
         reasons_buy.append(f"RSI oversold ({rsi_now:.1f})")
     if macd_bull:
         reasons_buy.append("MACD above signal (bullish)")
     if ema_bull:
         reasons_buy.append("EMA9 above EMA21 (bullish)")
-        if has_vol_spike:
-            reasons_buy.append("Volume spike (+50% above avg)")
-        if adaptive_note:
-            reasons_buy.append(adaptive_note)
+    if has_vol_spike:
+        reasons_buy.append("Volume spike (+50% above avg)")
+    if adaptive_note:
+        reasons_buy.append(adaptive_note)
 
     reasons_sell = []
-    if rsi_now > 55:
+    if rsi_now > 60:
         reasons_sell.append(f"RSI overbought ({rsi_now:.1f})")
     if macd_bear:
         reasons_sell.append("MACD below signal (bearish)")
     if ema_bear:
         reasons_sell.append("EMA9 below EMA21 (bearish)")
-        if has_vol_spike:
-            reasons_sell.append("Volume spike (+50% above avg)")
-        if adaptive_note:
-            reasons_sell.append(adaptive_note)
+    if has_vol_spike:
+        reasons_sell.append("Volume spike (+50% above avg)")
+    if adaptive_note:
+        reasons_sell.append(adaptive_note)
 
     def _make(action: str, reasons: list[str]) -> dict:
         is_buy = action == "BUY"
@@ -371,9 +382,9 @@ def signal_from_df(symbol: str, df: pd.DataFrame,
             "sl_mult": round(sl_mult, 2), "tp_mult": round(tp_mult, 2),
         }
 
-    if sum(buy_hits) >= 2:
+    if sum(buy_hits) >= 2 and has_vol:
         return _make("BUY", reasons_buy)
-    if sum(sell_hits) >= 2:
+    if sum(sell_hits) >= 2 and has_vol:
         return _make("SELL", reasons_sell)
     return None
 
@@ -443,8 +454,9 @@ def combine_signals(rule_sig: dict | None, ml_result: dict,
             sl_dist = atr_val * sl_mult
             tp = round(price + tp_dist if is_buy else price - tp_dist, 2)
             sl = round(price - sl_dist if is_buy else price + sl_dist, 2)
-            tp_pct = round((tp - price) / price * 100, 2)
-            sl_pct = round((sl - price) / price * 100, 2)
+            # Always positive: tp_pct = profit%, sl_pct = loss%
+            tp_pct = round(abs(tp - price) / price * 100, 2)
+            sl_pct = round(abs(sl - price) / price * 100, 2)
             rr = round(tp_dist / sl_dist, 1) if sl_dist > 0 else 0
             sig = {
                 "symbol": symbol, "action": ai_signal, "price": price,
@@ -458,6 +470,16 @@ def combine_signals(rule_sig: dict | None, ml_result: dict,
 
     if sig is None:
         return None
+
+    # EMA200 hard filter: block counter-trend signals
+    if df_1h is not None and not df_1h.empty:
+        ema200_trend = _trend(df_1h)
+        if ema200_trend == "down" and sig["action"] == "BUY":
+            print(f"[signals] EMA200 blocked BUY on {symbol} (price below EMA200)")
+            return None
+        if ema200_trend == "up" and sig["action"] == "SELL":
+            print(f"[signals] EMA200 blocked SELL on {symbol} (price above EMA200)")
+            return None
 
     # Multi-timeframe filter: if 1h bias exists and disagrees, suppress
     if bias_1h is not None and bias_1h != sig["action"]:
@@ -475,7 +497,7 @@ def combine_signals(rule_sig: dict | None, ml_result: dict,
 
     # Compute final quality score
     rule_hits = sum([
-        sig["rsi"] < 45 if sig["action"] == "BUY" else sig["rsi"] > 55,
+        sig["rsi"] < 40 if sig["action"] == "BUY" else sig["rsi"] > 60,
         any("MACD" in r for r in sig["reasons"]),
         any("EMA" in r for r in sig["reasons"]),
     ])
