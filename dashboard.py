@@ -6,7 +6,7 @@ from flask import Flask, jsonify, render_template_string, request
 from database import (
     init_db, get_stats, get_recent_signals,
     get_ml_accuracy_stats, get_ml_activity_log,
-    get_all_symbols_with_status, add_symbol, remove_symbol,
+    get_all_symbols_with_status, add_symbol, remove_symbol, delete_symbol,
     create_action_request, get_ops_snapshot,
     get_running_training_job, get_recent_training_jobs,
     get_all_settings, set_setting, get_all_sentiment_cache,
@@ -1079,26 +1079,30 @@ async function refreshAdmin() {
   const marketLabels = {us:'🇺🇸 US', xetra:'🇩🇪 XETRA', crypto:'₿ Crypto'};
   list.innerHTML = syms.map(s => {
     const statusBadge = s.active
-      ? '<span class="badge badge-active ms-2">Active</span>'
-      : '<span class="badge badge-inactive ms-2">Inactive</span>';
-    const delBtn = s.active
-      ? `<button class="btn btn-del" onclick="removeSymbol('${s.symbol}')">✕</button>`
-      : `<button class="btn btn-add ms-1" onclick="restoreSymbol('${s.symbol}')" style="font-size:.72rem;padding:2px 8px">Restore</button>`;
+      ? '<span class="badge badge-active">Active</span>'
+      : '<span class="badge badge-inactive">Inactive</span>';
+    const toggleBtn = s.active
+      ? `<button class="btn btn-del" style="background:#1a140a;color:#fbbf24;border-color:#fbbf2430" onclick="removeSymbol('${s.symbol}')" title="Deactivate">Deactivate</button>`
+      : `<button class="btn btn-add" style="font-size:.72rem;padding:2px 10px" onclick="restoreSymbol('${s.symbol}')" title="Activate">Activate</button>`;
+    const delBtn = `<button class="btn btn-del" onclick="hardDeleteSymbol('${s.symbol}')" title="Permanently delete">✕ Delete</button>`;
     const mkt = s.market || 'auto';
-    const marketSel = `<select class="form-control ms-2" style="max-width:130px;font-size:.75rem;padding:2px 6px"
+    const marketSel = s.active ? `<select class="form-control" style="max-width:125px;font-size:.75rem;padding:2px 6px"
         onchange="setSymbolMarket('${s.symbol}', this.value)">
-        <option value="" ${mkt==='auto'?'selected':''}>🔍 Auto-detect</option>
-        <option value="us" ${mkt==='us'?'selected':''}>🇺🇸 US (NYSE/NASDAQ)</option>
+        <option value="" ${mkt==='auto'?'selected':''}>🔍 Auto</option>
+        <option value="us" ${mkt==='us'?'selected':''}>🇺🇸 US</option>
         <option value="xetra" ${mkt==='xetra'?'selected':''}>🇩🇪 XETRA</option>
-        <option value="crypto" ${mkt==='crypto'?'selected':''}>₿ Crypto 24/7</option>
-      </select>`;
-    return `<div class="d-flex align-items-center mb-2 p-2 gap-1" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;flex-wrap:wrap">
-      <span class="sym-tag">${s.symbol}</span>${statusBadge}
+        <option value="crypto" ${mkt==='crypto'?'selected':''}>₿ Crypto</option>
+      </select>` : '';
+    const rowOpacity = s.active ? '' : 'opacity:.6;';
+    return `<div class="d-flex align-items-center mb-2 p-2 gap-2" style="${rowOpacity}background:var(--bg);border:1px solid var(--border);border-radius:6px;flex-wrap:wrap">
+      <span class="sym-tag">${s.symbol}</span>
+      ${statusBadge}
       ${marketSel}
       <span class="ms-auto text-muted" style="font-size:.70rem">${s.added_at.slice(0,10)}</span>
+      ${toggleBtn}
       ${delBtn}
     </div>`;
-  }).join('') || '<div style="color:#555">No symbols configured yet.</div>';
+  }).join('') || '<div class="text-muted">No symbols configured yet.</div>';
 
   const statsDiv = document.getElementById('symbol-stats');
   statsDiv.innerHTML = Object.entries(stats.per_symbol||{}).map(([sym, v]) => {
@@ -1166,9 +1170,16 @@ async function addSymbol() {
 }
 
 async function removeSymbol(sym) {
-  if (!confirm(`Remove ${sym} from watched symbols?`)) return;
+  if (!confirm(`Deactivate ${sym}? It will stop being scanned but can be reactivated.`)) return;
   const res = await fetch(`/api/symbols/${sym}`, {method:'DELETE'}).then(r=>r.json());
   if (res.ok) refreshAdmin();
+}
+
+async function hardDeleteSymbol(sym) {
+  if (!confirm(`Permanently delete ${sym}? The symbol will be removed from the watchlist entirely. Signal history is kept.`)) return;
+  const res = await fetch(`/api/symbols/${sym}/delete`, {method:'DELETE'}).then(r=>r.json());
+  if (res.ok) refreshAdmin();
+  else alert(res.error || 'Delete failed');
 }
 
 async function restoreSymbol(sym) {
@@ -1730,7 +1741,15 @@ def api_symbols_remove(symbol):
     removed = remove_symbol(symbol.upper())
     if removed:
         return jsonify({"ok": True})
-    return jsonify({"ok": False, "error": "Symbol not found or already inactive"}), 404
+    return jsonify({"ok": False, "error": "Symbol not found"}), 404
+
+
+@app.route("/api/symbols/<symbol>/delete", methods=["DELETE"])
+def api_symbols_delete(symbol):
+    deleted = delete_symbol(symbol.upper())
+    if deleted:
+        return jsonify({"ok": True})
+    return jsonify({"ok": False, "error": "Symbol not found"}), 404
 
 
 @app.route("/api/symbols/<symbol>/market", methods=["POST"])

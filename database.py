@@ -769,11 +769,25 @@ def remove_symbol(symbol: str) -> bool:
     sym = symbol.upper()
     with _conn() as conn:
         row = conn.execute(
-            "SELECT active FROM symbols WHERE symbol = ?", (sym,)
+            "SELECT id FROM symbols WHERE symbol = ?", (sym,)
         ).fetchone()
-        if not row or not row["active"]:
+        if not row:
             return False
         conn.execute("UPDATE symbols SET active = 0 WHERE symbol = ?", (sym,))
+        conn.execute("DELETE FROM sentiment_cache WHERE symbol = ?", (sym,))
+        return True
+
+
+def delete_symbol(symbol: str) -> bool:
+    """Hard-delete symbol from symbols table. Signal history is preserved. Returns True if found."""
+    sym = symbol.upper()
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT id FROM symbols WHERE symbol = ?", (sym,)
+        ).fetchone()
+        if not row:
+            return False
+        conn.execute("DELETE FROM symbols WHERE symbol = ?", (sym,))
         conn.execute("DELETE FROM sentiment_cache WHERE symbol = ?", (sym,))
         return True
 
@@ -921,7 +935,8 @@ def get_ml_accuracy_stats() -> dict:
         bootstrap_stats = {r["symbol"]: dict(r) for r in bootstrap_rows}
         training = {r["symbol"]: dict(r) for r in train_rows}
         active_symbols = set(get_active_symbols())
-        all_symbols = set(active_symbols) | set(training.keys())
+        # Only show active symbols — inactive ones are excluded from all views
+        all_symbols = active_symbols
 
         # Total training runs per symbol
         run_counts = conn.execute("""
@@ -1155,7 +1170,8 @@ def get_ml_activity_log(limit: int = 40, symbol: str | None = None,
 
     symbol_health = {}
     resolution_reason_counts: dict[str, int] = {}
-    all_symbols = sorted(set(sym_outcomes.keys()) | set(last_train_map.keys()) | set(last_cycle_map.keys()) | all_active_symbols)
+    # Only include active symbols — filter out inactive from all merged sets
+    all_symbols = sorted((set(sym_outcomes.keys()) | set(last_train_map.keys()) | set(last_cycle_map.keys()) | all_active_symbols) & all_active_symbols)
     for sym in all_symbols:
         outcomes = sym_outcomes.get(sym, [])
         last10 = outcomes[:10]
