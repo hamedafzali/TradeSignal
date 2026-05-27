@@ -304,42 +304,30 @@ def _rr_label(rr: float, lang: str) -> str:
             else "متوسط — سود برابر با ریسک شما")
 
 
-def signal_msg(sig: dict, lang: str = "en", mode: str = "beginner") -> str:
+def signal_msg(sig: dict, lang: str = "en", mode: str = "beginner",
+               currency_symbol: str = "$", fx_rate: float = 1.0) -> str:
     """
     Format a signal message for private DMs.
     Channel always uses expert English; this is for subscriptions/tracked trades.
     """
     action = sig["action"]
-    symbol = sig["symbol"]
-    price  = sig["price"]
-    tp     = sig.get("tp", 0)
-    sl     = sig.get("sl", 0)
-    tp_pct = sig.get("tp_pct", 0)
-    sl_pct = sig.get("sl_pct", 0)
-    rr     = sig.get("rr", 0)
-    rsi    = sig.get("rsi", 0)
-    trend  = sig.get("trend", "unknown")
-    quality = sig.get("quality", 0)
-    stars   = sig.get("stars", "")
-    ai_conf = sig.get("ai_confidence")
     strength = sig.get("strength", "RULE")
-    mtf     = sig.get("mtf_confirmed", False)
-
     is_buy = action == "BUY"
     action_emoji = ("🟢" if is_buy else "🔴") if strength != "STRONG" else ("🔥" if is_buy else "💀")
 
     if mode == "beginner":
-        return _signal_beginner(sig, lang, action_emoji)
+        return _signal_beginner(sig, lang, action_emoji, currency_symbol, fx_rate)
     else:
-        return _signal_expert(sig, lang, action_emoji)
+        return _signal_expert(sig, lang, action_emoji, currency_symbol, fx_rate)
 
 
-def _signal_beginner(sig: dict, lang: str, action_emoji: str) -> str:
+def _signal_beginner(sig: dict, lang: str, action_emoji: str,
+                     currency_symbol: str = "$", fx_rate: float = 1.0) -> str:
     action   = sig["action"]
     symbol   = sig["symbol"]
-    price    = sig["price"]
-    tp       = sig.get("tp", 0)
-    sl       = sig.get("sl", 0)
+    price    = sig["price"] * fx_rate
+    tp       = sig.get("tp", 0) * fx_rate
+    sl       = sig.get("sl", 0) * fx_rate
     tp_pct   = sig.get("tp_pct", 0)
     sl_pct   = sig.get("sl_pct", 0)
     rr       = sig.get("rr", 0)
@@ -347,6 +335,7 @@ def _signal_beginner(sig: dict, lang: str, action_emoji: str) -> str:
     stars    = sig.get("stars", "")
     strength = sig.get("strength", "RULE")
     mtf      = sig.get("mtf_confirmed", False)
+    cs       = currency_symbol
 
     ql = _quality_label(quality, lang)
     rrl = _rr_label(rr, lang)
@@ -363,9 +352,9 @@ def _signal_beginner(sig: dict, lang: str, action_emoji: str) -> str:
         return (
             f"{action_emoji} *سیگنال {action_word} — {symbol}*\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
-            f"💰 {entry_label}:    `${price:.2f}`\n"
-            f"🎯 هدف قیمتی:    `${tp:.2f}`  *(سود +{tp_pct:.1f}٪)*\n"
-            f"🛑 حد ضرر:       `${sl:.2f}`  *(ضرر {sl_pct:.1f}٪)*\n"
+            f"💰 {entry_label}:    `{cs}{price:.2f}`\n"
+            f"🎯 هدف قیمتی:    `{cs}{tp:.2f}`  *(سود +{tp_pct:.1f}٪)*\n"
+            f"🛑 حد ضرر:       `{cs}{sl:.2f}`  *(ضرر {sl_pct:.1f}٪)*\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"⚖️ نسبت سود به ریسک: {rrl}\n"
             f"⭐ قدرت سیگنال: {stars} *{ql}*\n"
@@ -385,9 +374,9 @@ def _signal_beginner(sig: dict, lang: str, action_emoji: str) -> str:
         return (
             f"{action_emoji} *{action_word} Signal — {symbol}*\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
-            f"💰 {entry_label}    `${price:.2f}`\n"
-            f"🎯 Target:    `${tp:.2f}`  *(profit +{tp_pct:.1f}%)*\n"
-            f"🛑 Stop loss: `${sl:.2f}`  *(max loss {sl_pct:.1f}%)*\n"
+            f"💰 {entry_label}    `{cs}{price:.2f}`\n"
+            f"🎯 Target:    `{cs}{tp:.2f}`  *(profit +{tp_pct:.1f}%)*\n"
+            f"🛑 Stop loss: `{cs}{sl:.2f}`  *(max loss {sl_pct:.1f}%)*\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"⚖️ Risk/Reward: {rrl}\n"
             f"⭐ Signal strength: {stars} *{ql}*\n"
@@ -397,12 +386,13 @@ def _signal_beginner(sig: dict, lang: str, action_emoji: str) -> str:
         )
 
 
-def _signal_expert(sig: dict, lang: str, action_emoji: str) -> str:
+def _signal_expert(sig: dict, lang: str, action_emoji: str,
+                   currency_symbol: str = "$", fx_rate: float = 1.0) -> str:
     action   = sig["action"]
     symbol   = sig["symbol"]
-    price    = sig["price"]
-    tp       = sig.get("tp", 0)
-    sl       = sig.get("sl", 0)
+    price    = sig["price"] * fx_rate
+    tp       = sig.get("tp", 0) * fx_rate
+    sl       = sig.get("sl", 0) * fx_rate
     tp_pct   = sig.get("tp_pct", 0)
     sl_pct   = sig.get("sl_pct", 0)
     rr       = sig.get("rr", 0)
@@ -414,6 +404,7 @@ def _signal_expert(sig: dict, lang: str, action_emoji: str) -> str:
     strength = sig.get("strength", "RULE")
     vol_spike = sig.get("vol_spike", False)
     mtf      = sig.get("mtf_confirmed", False)
+    cs       = currency_symbol
 
     reasons  = sig.get("reasons", [])
     ind_parts = []
@@ -439,9 +430,9 @@ def _signal_expert(sig: dict, lang: str, action_emoji: str) -> str:
         return (
             f"{action_emoji} *{action_word} — ${symbol}*\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
-            f"ورود:         `${price:.2f}`\n"
-            f"🎯 هدف:      `${tp:.2f}`  (`{tp_sign}{tp_pct:.1f}٪`)\n"
-            f"🛑 حد ضرر:  `${sl:.2f}`  (`{sl_sign}{sl_pct:.1f}٪`)\n"
+            f"ورود:         `{cs}{price:.2f}`\n"
+            f"🎯 هدف:      `{cs}{tp:.2f}`  (`{tp_sign}{tp_pct:.1f}٪`)\n"
+            f"🛑 حد ضرر:  `{cs}{sl:.2f}`  (`{sl_sign}{sl_pct:.1f}٪`)\n"
             f"⚖️ R/R:      `1 : {rr}`\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"اندیکاتورها: {ind_line}\n"
@@ -459,9 +450,9 @@ def _signal_expert(sig: dict, lang: str, action_emoji: str) -> str:
         return (
             f"{action_emoji} *{action} — ${symbol}*\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
-            f"Entry:       `${price:.2f}`\n"
-            f"🎯 Target:  `${tp:.2f}`  (`{tp_sign}{tp_pct:.1f}%`)\n"
-            f"🛑 Stop:    `${sl:.2f}`  (`{sl_sign}{sl_pct:.1f}%`)\n"
+            f"Entry:       `{cs}{price:.2f}`\n"
+            f"🎯 Target:  `{cs}{tp:.2f}`  (`{tp_sign}{tp_pct:.1f}%`)\n"
+            f"🛑 Stop:    `{cs}{sl:.2f}`  (`{sl_sign}{sl_pct:.1f}%`)\n"
             f"⚖️  R/R:     `1 : {rr}`\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"Indicators: {ind_line}\n"

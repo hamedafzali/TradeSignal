@@ -76,6 +76,37 @@ from signals import (
 
 load_dotenv()
 
+# ── Currency helpers ───────────────────────────────────────────────────────────
+_CURRENCY_SYMBOLS = {"USD": "$", "EUR": "€", "GBP": "£", "CHF": "Fr"}
+_fx_cache: dict = {}  # {currency: (rate, timestamp)}
+_FX_CACHE_TTL = 300   # seconds
+
+def _get_fx_rate(currency: str) -> float:
+    """Return the USD→currency conversion rate, cached for 5 minutes."""
+    if currency == "USD":
+        return 1.0
+    import time
+    cached = _fx_cache.get(currency)
+    if cached and time.time() - cached[1] < _FX_CACHE_TTL:
+        return cached[0]
+    try:
+        ticker = yf.Ticker(f"USD{currency}=X")
+        rate = ticker.fast_info.last_price
+        if rate and rate > 0:
+            _fx_cache[currency] = (rate, time.time())
+            return rate
+    except Exception:
+        pass
+    return 1.0
+
+def _get_display_currency() -> tuple[str, str, float]:
+    """Return (currency_code, symbol, fx_rate) from settings."""
+    currency = get_setting("display_currency", "USD").upper()
+    symbol = _CURRENCY_SYMBOLS.get(currency, currency + " ")
+    rate = _get_fx_rate(currency)
+    return currency, symbol, rate
+
+
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "")
@@ -703,7 +734,8 @@ async def _broadcast_signal(bot, sig: dict, session: str = "open") -> None:
     admin_pref = get_user_pref(ADMIN_CHAT_ID) if ADMIN_CHAT_ID else {}
     ch_lang = admin_pref.get("lang", "en")
     ch_mode = admin_pref.get("mode", "beginner")
-    body = signal_msg(sig, lang=ch_lang, mode=ch_mode)
+    _, cs, fx = _get_display_currency()
+    body = signal_msg(sig, lang=ch_lang, mode=ch_mode, currency_symbol=cs, fx_rate=fx)
     cet_time = datetime.now(CET).strftime("%H:%M")
     tz_label = "CEST" if datetime.now(CET).dst() else "CET"
     session_label = "  ·  🌅 پیش‌بازار" if (session == "pre" and ch_lang == "fa") else ("  ·  🌅 Pre-market" if session == "pre" else "")
@@ -746,7 +778,8 @@ async def _send_private_sell(bot, user_id: str, sig: dict) -> None:
 
 async def _send_subscriber_alert(bot, user_id: str, sig: dict) -> None:
     pref = get_user_pref(user_id)
-    msg = signal_msg(sig, lang=pref["lang"], mode=pref["mode"])
+    _, cs, fx = _get_display_currency()
+    msg = signal_msg(sig, lang=pref["lang"], mode=pref["mode"], currency_symbol=cs, fx_rate=fx)
     try:
         await bot.send_message(chat_id=user_id, text=msg, parse_mode="Markdown")
     except Exception as e:

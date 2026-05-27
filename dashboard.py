@@ -612,6 +612,17 @@ _HTML = """<!DOCTYPE html>
               <div class="small mt-1 text-muted">Outcome results are always visible in the dashboard</div>
             </div>
 
+            <div class="col-md-4">
+              <label class="small text-muted">Display Currency</label>
+              <select id="set-display_currency" class="form-control mt-1">
+                <option value="USD">$ USD — US Dollar</option>
+                <option value="EUR">€ EUR — Euro</option>
+                <option value="GBP">£ GBP — British Pound</option>
+                <option value="CHF">Fr CHF — Swiss Franc</option>
+              </select>
+              <div class="small mt-1 text-muted">Price, TP and SL in Telegram signals will be shown in this currency</div>
+            </div>
+
           </div>
           <div class="d-flex gap-3 align-items-center mt-3">
             <button class="btn" style="background:var(--surface2);color:var(--accent);border:1px solid var(--border);padding:6px 20px"
@@ -679,6 +690,14 @@ Chart.defaults.plugins.tooltip.borderColor = '#2a2d3a';
 Chart.defaults.plugins.tooltip.borderWidth = 1;
 
 let dailyChart, symbolChart, bucketsChart, strengthChart, resolutionReasonsChart, resolutionTimeChart, mfeMaeChart, trainRunsChart;
+let _fxRate = 1.0, _fxSymbol = '$';
+async function _loadFx() {
+  const fx = await fetch('/api/fx-rate').then(r=>r.json());
+  _fxRate = fx.rate || 1.0;
+  _fxSymbol = fx.symbol || '$';
+}
+function fxPrice(usd) { return (_fxRate * usd).toFixed(2); }
+_loadFx();
 
 function statusChip(ok, okText, warnText) {
   if (ok === 'ok')   return `<span class="status-dot status-ok d-inline-block"></span><span style="color:var(--green)">${okText}</span>`;
@@ -868,7 +887,7 @@ async function refreshOverview() {
     <td><span class="sym-tag">${s.symbol}</span></td>
     <td>${badge(s.action,'badge-'+s.action)}</td>
     <td>${badge(s.strength||'RULE','badge-'+(s.strength||'RULE'))}</td>
-    <td style="white-space:nowrap">$${s.price?s.price.toFixed(2):'—'}</td>
+    <td style="white-space:nowrap">${s.price?_fxSymbol+fxPrice(s.price):'—'}</td>
     <td style="color:var(--muted)">${s.ai_confidence?(s.ai_confidence*100).toFixed(0)+'%':'—'}</td>
     <td>${outcomeBadge(s.outcome)}</td>
   </tr>`).join('');
@@ -1003,7 +1022,7 @@ async function loadSettings() {
   const s = await fetch('/api/settings').then(r => r.json());
   const keys = ['sentiment_provider','news_provider','sentiment_suppress_threshold',
                  'finnhub_api_key','gemini_api_key','claude_api_key','sentiment_local_url','news_lookback_hours',
-                 'outcome_notify_admin'];
+                 'outcome_notify_admin','display_currency'];
   for (const k of keys) {
     const el = document.getElementById('set-' + k);
     if (el && s[k] !== undefined) el.value = s[k];
@@ -1030,7 +1049,7 @@ async function saveSettings() {
   msg.textContent = 'Saving…';
   const keys = ['sentiment_provider','news_provider','sentiment_suppress_threshold',
                  'finnhub_api_key','gemini_api_key','claude_api_key','sentiment_local_url','news_lookback_hours',
-                 'outcome_notify_admin'];
+                 'outcome_notify_admin','display_currency'];
   const payload = {};
   for (const k of keys) {
     const el = document.getElementById('set-' + k);
@@ -1044,6 +1063,7 @@ async function saveSettings() {
   if (res.ok) {
     msg.style.color = '#4ade80';
     msg.textContent = '✓ Saved — takes effect on next scan (no restart needed)';
+    _loadFx();
   } else {
     msg.style.color = '#f87171';
     msg.textContent = res.error || 'Save failed';
@@ -1750,6 +1770,24 @@ def api_symbols_delete(symbol):
     if deleted:
         return jsonify({"ok": True})
     return jsonify({"ok": False, "error": "Symbol not found"}), 404
+
+
+@app.route("/api/fx-rate")
+def api_fx_rate():
+    currency = get_all_settings().get("display_currency", "USD").upper()
+    _symbols = {"USD": "$", "EUR": "€", "GBP": "£", "CHF": "Fr"}
+    symbol = _symbols.get(currency, currency + " ")
+    if currency == "USD":
+        return jsonify({"currency": currency, "symbol": symbol, "rate": 1.0})
+    try:
+        import yfinance as yf
+        ticker = yf.Ticker(f"USD{currency}=X")
+        rate = ticker.fast_info.last_price
+        if rate and rate > 0:
+            return jsonify({"currency": currency, "symbol": symbol, "rate": round(rate, 6)})
+    except Exception:
+        pass
+    return jsonify({"currency": currency, "symbol": symbol, "rate": 1.0})
 
 
 @app.route("/api/symbols/<symbol>/market", methods=["POST"])
