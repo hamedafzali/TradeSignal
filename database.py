@@ -769,7 +769,7 @@ def remove_symbol(symbol: str) -> bool:
     sym = symbol.upper()
     with _conn() as conn:
         row = conn.execute(
-            "SELECT id FROM symbols WHERE symbol = ?", (sym,)
+            "SELECT symbol FROM symbols WHERE symbol = ?", (sym,)
         ).fetchone()
         if not row:
             return False
@@ -783,7 +783,7 @@ def delete_symbol(symbol: str) -> bool:
     sym = symbol.upper()
     with _conn() as conn:
         row = conn.execute(
-            "SELECT id FROM symbols WHERE symbol = ?", (sym,)
+            "SELECT symbol FROM symbols WHERE symbol = ?", (sym,)
         ).fetchone()
         if not row:
             return False
