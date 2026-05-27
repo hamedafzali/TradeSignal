@@ -151,13 +151,77 @@ _HTML = """<!DOCTYPE html>
   .sug-warn  { border-color:#ef444435; background:#1a0a0a; }
   .sug-ok    { border-color:#22c55e35; background:#0a1a0e; }
   .sug-info  { border-color:#38bdf835; background:#0a141e; }
+
+  /* ── Theme toggle button ── */
+  #theme-toggle { background:none; border:1px solid var(--border); color:var(--muted); border-radius:7px; padding:3px 9px; font-size:.8rem; cursor:pointer; transition:all .15s; line-height:1.4; }
+  #theme-toggle:hover { border-color:var(--accent); color:var(--text); }
+
+  /* ── Light theme overrides ── */
+  [data-theme="light"] {
+    --bg:       #f0f3fa;
+    --surface:  #ffffff;
+    --surface2: #eaeff8;
+    --border:   #dce2f0;
+    --border2:  #c8d0e8;
+    --text:     #1a1d2e;
+    --muted:    #64748b;
+    --dim:      #94a3b8;
+    --accent:   #0284c7;
+    --green:    #16a34a;
+    --red:      #dc2626;
+    --yellow:   #b45309;
+    --purple:   #7c3aed;
+    --pink:     #db2777;
+  }
+  [data-theme="light"] body { background:var(--bg); color:var(--text); }
+  [data-theme="light"] .card { background:var(--surface); }
+  [data-theme="light"] .ops-card { background:var(--surface2); }
+  [data-theme="light"] .health-card { background:var(--surface2); }
+  [data-theme="light"] .event-row { background:var(--surface2); }
+  [data-theme="light"] .outcome-row { background:var(--surface2); }
+  [data-theme="light"] .form-control { background:var(--surface); }
+  [data-theme="light"] .form-control:focus { background:var(--surface); }
+  [data-theme="light"] .action-btn { background:var(--surface); }
+  [data-theme="light"] .action-btn:hover { background:var(--surface2); color:var(--text); }
+  [data-theme="light"] .dropdown-menu { background:var(--surface); }
+  [data-theme="light"] .dropdown-item:hover { background:var(--surface2); }
+  [data-theme="light"] .modal-content { background:var(--surface); }
+  [data-theme="light"] .sug-warn { background:#fff5f5; }
+  [data-theme="light"] .sug-ok   { background:#f0fff4; }
+  [data-theme="light"] .sug-info { background:#f0f9ff; }
+  [data-theme="light"] .badge-correct   { background:#dcfce7; color:#15803d; }
+  [data-theme="light"] .badge-incorrect { background:#fee2e2; color:#b91c1c; }
+  [data-theme="light"] .badge-pending   { background:var(--border); color:var(--muted); }
+  [data-theme="light"] .badge-neutral   { background:#fef9c3; color:#92400e; }
+  [data-theme="light"] .badge-BUY    { background:#e0f2fe; color:#0369a1; }
+  [data-theme="light"] .badge-SELL   { background:#fce7f3; color:#9d174d; }
+  [data-theme="light"] .badge-STRONG { background:#fef3c7; color:#92400e; }
+  [data-theme="light"] .badge-AI     { background:#ede9fe; color:#5b21b6; }
+  [data-theme="light"] .badge-RULE   { background:#dcfce7; color:#15803d; }
+  [data-theme="light"] .badge-active   { background:#dcfce7; color:#15803d; }
+  [data-theme="light"] .badge-inactive { background:#fee2e2; color:#b91c1c; }
+  [data-theme="light"] .sym-tag { background:#e0f2fe; color:#0369a1; }
+  [data-theme="light"] .table { --bs-table-color:var(--text); --bs-table-bg:transparent; --bs-table-border-color:var(--border); color:var(--text); }
+  [data-theme="light"] .table td, [data-theme="light"] .table th { color:var(--text); border-color:var(--border) !important; }
+  [data-theme="light"] .table-hover tbody tr:hover td { background:var(--surface2) !important; }
+  [data-theme="light"] .progress { background:var(--border2); }
+  [data-theme="light"] ::-webkit-scrollbar-thumb { background:var(--border2); }
 </style>
+<script>
+  (function(){
+    var t = localStorage.getItem('tsTheme') || 'dark';
+    document.documentElement.setAttribute('data-theme', t);
+  })();
+</script>
 </head>
 <body>
 <div class="container-fluid py-2 px-3">
   <div class="d-flex justify-content-between align-items-center mb-2">
-    <span style="font-size:.95rem;font-weight:700;color:#fff;letter-spacing:.01em">Trade Signals</span>
-    <span class="refresh-note" id="last-refresh"></span>
+    <span style="font-size:.95rem;font-weight:700;color:var(--text);letter-spacing:.01em">Trade Signals</span>
+    <div class="d-flex align-items-center gap-3">
+      <span class="refresh-note" id="last-refresh"></span>
+      <button id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">☀️</button>
+    </div>
   </div>
 
   <!-- Tab navigation -->
@@ -210,7 +274,7 @@ _HTML = """<!DOCTYPE html>
         <div class="card p-3">
           <div class="section-head mb-2">Recent Signals</div>
           <div class="table-responsive">
-            <table class="table table-dark table-hover mb-0">
+            <table class="table table-hover mb-0">
               <thead><tr>
                 <th>Time</th><th>Symbol</th><th>Action</th><th>Type</th>
                 <th>Price</th><th>AI%</th><th>Outcome</th>
@@ -253,7 +317,7 @@ _HTML = """<!DOCTYPE html>
             <span id="ml-table-note" style="font-size:.70rem;color:var(--muted)"></span>
           </div>
           <div class="table-responsive">
-            <table class="table table-dark table-hover mb-0" id="ml-table">
+            <table class="table table-hover mb-0" id="ml-table">
               <thead><tr>
                 <th>Symbol</th>
                 <th title="Historical win rate from bootstrap backtest">Bootstrap WR</th>
@@ -1514,6 +1578,20 @@ async function refreshJobs() {
       }).join('')
     : '<div style="color:#555;font-size:.85rem">No training jobs run yet. Click "Run Bootstrap" to pre-train models from 2 years of historical data.</div>';
 }
+
+// ── Theme ─────────────────────────────────────────────────────────────────────
+function toggleTheme() {
+  const current = document.documentElement.getAttribute('data-theme') || 'dark';
+  const next = current === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('tsTheme', next);
+  document.getElementById('theme-toggle').textContent = next === 'dark' ? '☀️' : '🌙';
+}
+(function initThemeIcon(){
+  const t = document.documentElement.getAttribute('data-theme') || 'dark';
+  const btn = document.getElementById('theme-toggle');
+  if (btn) btn.textContent = t === 'dark' ? '☀️' : '🌙';
+})();
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 refreshOverview();
