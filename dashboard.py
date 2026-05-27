@@ -231,7 +231,10 @@ _HTML = """<!DOCTYPE html>
     <div class="row g-2 mb-3">
       <div class="col-12">
         <div class="card p-3">
-          <h6 class="mb-2" style="font-size:.85rem">Per-Symbol ML Performance</h6>
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <h6 class="mb-0" style="font-size:.85rem">Per-Symbol ML Performance</h6>
+            <span id="ml-table-note" style="font-size:.74rem;color:#555"></span>
+          </div>
           <div class="table-responsive">
             <table class="table table-dark table-hover mb-0" id="ml-table">
               <thead><tr>
@@ -253,7 +256,7 @@ _HTML = """<!DOCTYPE html>
       <div class="col-md-6">
         <div class="card p-3">
           <h6 class="mb-2" style="font-size:.85rem">Signal Type Breakdown</h6>
-          <canvas id="chart-strength" height="140"></canvas>
+          <div style="position:relative;height:160px"><canvas id="chart-strength"></canvas></div>
         </div>
       </div>
       <div class="col-md-6">
@@ -384,7 +387,7 @@ _HTML = """<!DOCTYPE html>
       <div class="col-md-6">
         <div class="card p-3">
           <h6 class="mb-2" style="font-size:.85rem">🧭 Outcome Resolution</h6>
-          <canvas id="chart-resolution-reasons" height="140"></canvas>
+          <div style="position:relative;height:160px"><canvas id="chart-resolution-reasons"></canvas></div>
         </div>
       </div>
       <div class="col-md-6">
@@ -894,6 +897,12 @@ async function refreshML() {
   }).join('');
   document.getElementById('ml-body').innerHTML = rows ||
     '<tr><td colspan="6" class="text-center" style="color:#555">No resolved signals yet</td></tr>';
+  const totalResolved = Object.values(ml.per_symbol).reduce((s,d) => s + (d.rule_total||0) + (d.ai_total||0) + (d.strong_total||0), 0);
+  const noteEl = document.getElementById('ml-table-note');
+  if (noteEl) {
+    if (totalResolved < 50) noteEl.textContent = `${totalResolved} resolved signals — accuracy stabilises above ~50 per symbol`;
+    else noteEl.textContent = '';
+  }
 
   // Strength breakdown (from stats)
   const stats = await fetch('/api/stats').then(r=>r.json());
@@ -908,7 +917,7 @@ async function refreshML() {
         backgroundColor:['#38bdf8','#f472b6','#4ade80'],
         borderColor:'#1a1d27', borderWidth:3,
       }]},
-      options:{plugins:{legend:{labels:{color:'#8b8fa8'}}}}
+      options:{maintainAspectRatio:false, plugins:{legend:{position:'right',labels:{color:'#8b8fa8',boxWidth:12,padding:10}}}}
     });
   } else {
     strengthChart.data.labels=Object.keys(bs);
@@ -1219,7 +1228,7 @@ async function refreshActivity() {
           borderWidth: 3,
         }],
       },
-      options: {plugins:{legend:{labels:{color:'#8b8fa8'}}}}
+      options: {maintainAspectRatio:false, plugins:{legend:{position:'right',labels:{color:'#8b8fa8',boxWidth:12,padding:10}}}}
     });
   } else {
     resolutionReasonsChart.data.labels = reasonLabels;
