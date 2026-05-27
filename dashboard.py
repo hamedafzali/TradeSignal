@@ -152,6 +152,13 @@ _HTML = """<!DOCTYPE html>
   .sug-ok    { border-color:#22c55e35; background:#0a1a0e; }
   .sug-info  { border-color:#38bdf835; background:#0a141e; }
 
+  /* ── Sub-tabs (Learning) ── */
+  .sub-tabs { border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+  .sub-tabs .nav-item { margin-bottom: -1px; }
+  .sub-tabs .nav-link { color: var(--muted); font-size: .76rem; padding: 5px 14px; border-radius: 6px 6px 0 0; border: 1px solid transparent; background: transparent; }
+  .sub-tabs .nav-link.active { color: var(--text); background: var(--surface); border-color: var(--border) var(--border) var(--surface); }
+  .sub-tabs .nav-link:hover { color: var(--text); background: var(--surface2); border-color: var(--border); }
+
   /* ── Theme toggle button ── */
   #theme-toggle { background:none; border:1px solid var(--border); color:var(--muted); border-radius:7px; padding:3px 9px; font-size:.8rem; cursor:pointer; transition:all .15s; line-height:1.4; }
   #theme-toggle:hover { border-color:var(--accent); color:var(--text); }
@@ -348,64 +355,41 @@ _HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <div class="row g-2 mb-2">
-      <div class="col-md-6">
-        <div class="card p-3">
-          <div class="section-head">How Training Works</div>
-          <div style="color:var(--muted);font-size:.78rem;line-height:1.7">
-            <span style="color:var(--green)">Every 10 min</span> — checks each symbol for new outcomes.
-            <span style="color:var(--yellow)">3 new outcomes</span> triggers immediate retrain.
-            Fallback: every <span style="color:var(--accent)">2 hours</span>.<br>
-            Real outcomes blended at <span style="color:var(--purple)">3× weight</span>.
-            Two GradientBoosting classifiers (BUY + SELL).
-            Signal fires above <span style="color:var(--yellow)">65%</span> threshold. STRONG = rule + AI agree.
-          </div>
-        </div>
-      </div>
-      <div class="col-md-6">
-        <div class="card p-3 h-100">
-          <div class="section-head">Confidence Notes</div>
-          <div style="color:var(--muted);font-size:.78rem;line-height:1.7">
-            Low confidence usually means limited resolved outcomes, not a broken model — improves as outcomes accumulate.
-            <div class="mt-2" id="ml-confidence-note"></div>
-          </div>
-        </div>
-      </div>
-    </div>
   </div>
 
   <!-- ── LEARNING ACTIVITY TAB ───────────────────────────────────────── -->
   <div class="tab-pane fade" id="tab-activity">
 
-    <div class="row g-2 mb-3">
+    <!-- Always-visible: Action Center + Snapshot -->
+    <div class="row g-2 mb-2">
       <div class="col-md-5">
         <div class="card p-3 h-100">
           <div class="section-head">🎛 Action Center</div>
           <div class="row g-2">
-            <div class="col-md-6"><button class="btn action-btn" onclick="runAction('scan_now')">Scan Market Now</button></div>
-            <div class="col-md-6"><button class="btn action-btn" onclick="runAction('check_outcomes_now')">Check Outcomes Now</button></div>
-            <div class="col-md-6"><button class="btn action-btn" onclick="runAction('retrain_all')">Retrain All Models</button></div>
-            <div class="col-md-6"><button class="btn action-btn" style="border-color:#a78bfa40;color:#a78bfa" onclick="runAction('run_bootstrap')">🚀 Run Bootstrap</button></div>
+            <div class="col-6"><button class="btn action-btn" onclick="runAction('scan_now')">Scan Market Now</button></div>
+            <div class="col-6"><button class="btn action-btn" onclick="runAction('check_outcomes_now')">Check Outcomes Now</button></div>
+            <div class="col-6"><button class="btn action-btn" onclick="runAction('retrain_all')">Retrain All Models</button></div>
+            <div class="col-6"><button class="btn action-btn" style="border-color:#a78bfa40;color:#a78bfa" onclick="runAction('run_bootstrap')">🚀 Run Bootstrap</button></div>
             <div class="col-12 d-flex gap-2">
-              <select id="action-symbol" class="form-control" style="max-width:200px">
+              <select id="action-symbol" class="form-control" style="max-width:190px">
                 <option value="">Pick symbol</option>
               </select>
-              <button class="btn action-btn" onclick="runSymbolRetrain()">Retrain Symbol</button>
+              <button class="btn action-btn" onclick="runSymbolRetrain()">Retrain</button>
             </div>
           </div>
-          <div id="action-msg" class="small mt-3" style="min-height:1.2em;color:#8b8fa8"></div>
+          <div id="action-msg" class="small mt-2" style="min-height:1.2em;color:var(--muted)"></div>
         </div>
       </div>
       <div class="col-md-7">
         <div class="card p-3 h-100">
           <div class="section-head">🛰 Operator Snapshot</div>
-          <div id="ops-snapshot" style="font-size:.82rem;color:#8b8fa8;line-height:1.6"></div>
+          <div id="ops-snapshot" style="font-size:.82rem;color:var(--muted);line-height:1.6"></div>
         </div>
       </div>
     </div>
 
-    <!-- Live bootstrap job progress -->
-    <div class="row g-2 mb-3" id="job-progress-row" style="display:none">
+    <!-- Live job progress (hidden unless running) -->
+    <div class="row g-2 mb-2" id="job-progress-row" style="display:none">
       <div class="col-12">
         <div class="card p-3" style="border-color:#a78bfa40;background:#1a1a2e">
           <div class="d-flex justify-content-between align-items-center mb-2">
@@ -413,109 +397,116 @@ _HTML = """<!DOCTYPE html>
             <span id="job-status-badge" class="badge" style="background:#a78bfa22;color:#a78bfa">running</span>
           </div>
           <div id="job-progress-bar-wrap" class="mb-2">
-            <div class="progress" style="height:10px;background:#2a2d3a">
+            <div class="progress" style="height:8px">
               <div id="job-progress-bar" class="progress-bar" style="width:0%;background:#a78bfa;transition:width .4s"></div>
             </div>
           </div>
-          <div class="d-flex justify-content-between" style="font-size:.8rem">
+          <div class="d-flex justify-content-between" style="font-size:.78rem">
             <span id="job-progress-label" style="color:#a78bfa">Starting…</span>
-            <span id="job-progress-pct" style="color:#8b8fa8"></span>
+            <span id="job-progress-pct" style="color:var(--muted)"></span>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- Recent training jobs -->
-    <div class="row g-2 mb-3">
-      <div class="col-12">
-        <div class="card p-3">
+    <!-- Sub-navigation -->
+    <ul class="nav sub-tabs" id="learning-subtabs" role="tablist">
+      <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#lt-health" role="tab">🩺 Health</button></li>
+      <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#lt-analytics" role="tab">📊 Analytics</button></li>
+      <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#lt-log" role="tab">📋 Log</button></li>
+    </ul>
+
+    <div class="tab-content">
+
+      <!-- ── Health sub-tab ── -->
+      <div class="tab-pane fade show active" id="lt-health" role="tabpanel">
+
+        <!-- Job history (compact) -->
+        <div class="card p-3 mb-2">
           <div class="d-flex justify-content-between align-items-center mb-2">
-            <div class="section-head mb-0">📦 Bootstrap & Training Job History</div>
-            <button class="btn btn-sm" style="background:#1a2d3a;color:#38bdf8;border:1px solid #2a2d3a" onclick="refreshJobs()">↻ Refresh</button>
+            <div class="section-head mb-0">📦 Job History</div>
+            <button class="btn btn-sm" style="background:var(--surface2);color:var(--accent);border:1px solid var(--border)" onclick="refreshJobs()">↻ Refresh</button>
           </div>
-          <div id="job-history"></div>
+          <div id="job-history" style="max-height:160px;overflow-y:auto"></div>
         </div>
-      </div>
-    </div>
 
-    <!-- Model health cards per symbol -->
-    <div class="row g-2 mb-3">
-      <div class="col-12">
-        <div class="card p-3">
+        <!-- Model health + suggestions inline -->
+        <div class="card p-3 mb-2">
           <div class="d-flex justify-content-between align-items-center mb-2">
             <div class="section-head mb-0">🩺 Model Health per Symbol</div>
-            <div class="d-flex gap-2 align-items-center">
-              <select id="activity-symbol" class="form-control" style="max-width:150px" onchange="refreshActivity()">
+            <div class="d-flex gap-2 align-items-center flex-wrap">
+              <select id="activity-symbol" class="form-control" style="max-width:140px" onchange="refreshActivity()">
                 <option value="">All symbols</option>
               </select>
-              <select id="activity-days" class="form-control" style="max-width:150px" onchange="refreshActivity()">
+              <select id="activity-days" class="form-control" style="max-width:130px" onchange="refreshActivity()">
                 <option value="0">All time</option>
                 <option value="7">Last 7 days</option>
                 <option value="30">Last 30 days</option>
                 <option value="90">Last 90 days</option>
               </select>
-              <button class="btn btn-sm" style="background:#1a2d3a;color:#38bdf8;border:1px solid #2a2d3a"
-                onclick="refreshActivity()">↻ Refresh</button>
+              <button class="btn btn-sm" style="background:var(--surface2);color:var(--accent);border:1px solid var(--border)" onclick="refreshActivity()">↻</button>
             </div>
           </div>
-          <div id="health-cards" class="row g-3"></div>
+          <div id="health-cards" class="row g-2 mb-3"></div>
+          <div style="border-top:1px solid var(--border);padding-top:10px">
+            <div class="section-head" style="font-size:.74rem;color:var(--muted);margin-bottom:6px">💡 What Needs Attention</div>
+            <div id="suggestions"></div>
+          </div>
         </div>
-      </div>
-    </div>
 
-    <div class="row g-2 mb-3">
-      <div class="col-md-6">
-        <div class="card p-3">
-          <div class="section-head">🧭 Outcome Resolution</div>
-          <div style="position:relative;height:160px"><canvas id="chart-resolution-reasons"></canvas></div>
-        </div>
-      </div>
-      <div class="col-md-6">
-        <div class="card p-3">
-          <div class="section-head">⏱ Avg Time to Outcome</div>
-          <canvas id="chart-resolution-time" height="140"></canvas>
-        </div>
-      </div>
-    </div>
+      </div><!-- lt-health -->
 
-    <div class="row g-2 mb-3">
-      <div class="col-md-6">
-        <div class="card p-3">
-          <div class="section-head">📏 MFE vs MAE by Symbol</div>
-          <canvas id="chart-mfe-mae" height="140"></canvas>
+      <!-- ── Analytics sub-tab ── -->
+      <div class="tab-pane fade" id="lt-analytics" role="tabpanel">
+        <div class="row g-2 mb-2">
+          <div class="col-md-6">
+            <div class="card p-3">
+              <div class="section-head">🧭 Outcome Resolution</div>
+              <div style="position:relative;height:160px"><canvas id="chart-resolution-reasons"></canvas></div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="card p-3">
+              <div class="section-head">⏱ Avg Time to Outcome</div>
+              <canvas id="chart-resolution-time" height="140"></canvas>
+            </div>
+          </div>
         </div>
-      </div>
-      <div class="col-md-6">
-        <div class="card p-3 h-100">
-          <div class="section-head">🧠 Adaptive TP/SL Tuning</div>
-          <div id="adaptive-summary" style="font-size:.82rem;color:#8b8fa8;line-height:1.6"></div>
+        <div class="row g-2">
+          <div class="col-md-6">
+            <div class="card p-3">
+              <div class="section-head">📏 MFE vs MAE by Symbol</div>
+              <canvas id="chart-mfe-mae" height="140"></canvas>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="card p-3 h-100">
+              <div class="section-head">🧠 Adaptive TP/SL Tuning</div>
+              <div id="adaptive-summary" style="font-size:.82rem;color:var(--muted);line-height:1.6"></div>
+            </div>
+          </div>
         </div>
-      </div>
-    </div>
+      </div><!-- lt-analytics -->
 
-    <div class="row g-2 mb-3">
-      <div class="col-md-6">
-        <div class="card p-3 h-100">
-          <div class="section-head">📋 Learning Cycle Log</div>
-          <div id="train-log" style="max-height:380px;overflow-y:auto"></div>
+      <!-- ── Log sub-tab ── -->
+      <div class="tab-pane fade" id="lt-log" role="tabpanel">
+        <div class="row g-2">
+          <div class="col-md-6">
+            <div class="card p-3 h-100">
+              <div class="section-head">📋 Learning Cycle Log</div>
+              <div id="train-log" style="max-height:520px;overflow-y:auto"></div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="card p-3 h-100">
+              <div class="section-head">📬 Recent Outcomes</div>
+              <div id="outcome-feed" style="max-height:520px;overflow-y:auto"></div>
+            </div>
+          </div>
         </div>
-      </div>
-      <div class="col-md-6">
-        <div class="card p-3 h-100">
-          <div class="section-head">📬 Recent Outcomes</div>
-          <div id="outcome-feed" style="max-height:380px;overflow-y:auto"></div>
-        </div>
-      </div>
-    </div>
+      </div><!-- lt-log -->
 
-    <div class="row g-2 mb-3">
-      <div class="col-12">
-        <div class="card p-3">
-          <div class="section-head">💡 What Needs Attention</div>
-          <div id="suggestions"></div>
-        </div>
-      </div>
-    </div>
+    </div><!-- inner tab-content -->
   </div>
 
   <!-- ── ADMIN TAB ─────────────────────────────────────────────────────── -->
@@ -525,15 +516,15 @@ _HTML = """<!DOCTYPE html>
       <div class="col-12">
         <div class="card p-3" style="border-color:#a78bfa40">
           <div class="section-head">🚀 ML Bootstrap — Pre-train from 2 Years of Historical Data</div>
-          <p class="small mb-2" style="color:#8b8fa8;font-size:.8rem">
+          <p class="small mb-2 text-muted">
             Runs the signal engine on 2 years of hourly bars per symbol, labels each signal
             as correct/incorrect from TP/SL outcomes, and trains the ML models.
-            Takes ~5–10 minutes. Progress is visible in the 🔄 Learning tab.
+            Takes ~5–10 minutes. Progress is visible in the Learning tab.
           </p>
           <div class="d-flex gap-3 align-items-center flex-wrap">
-            <button class="btn" style="background:#2a1a4a;color:#a78bfa;border:1px solid #a78bfa40;padding:8px 24px;font-size:.9rem"
+            <button class="btn" style="background:var(--surface2);color:var(--purple);border:1px solid var(--border);padding:8px 24px;font-size:.9rem"
               onclick="adminBootstrap()">🚀 Run Bootstrap (All Symbols)</button>
-            <div id="bootstrap-msg" class="small" style="color:#8b8fa8"></div>
+            <div id="bootstrap-msg" class="small text-muted"></div>
           </div>
         </div>
       </div>
@@ -544,7 +535,7 @@ _HTML = """<!DOCTYPE html>
       <div class="col-12">
         <div class="card p-3" style="border-color:#38bdf840">
           <div class="section-head">🧠 AI Sentiment Settings</div>
-          <p class="small mb-2" style="color:#8b8fa8;font-size:.8rem">
+          <p class="small mb-2 text-muted">
             Switch provider without restarting the bot — changes take effect on the next scan.
           </p>
           <div class="row g-3" id="settings-form">
@@ -557,7 +548,7 @@ _HTML = """<!DOCTYPE html>
                 <option value="gemini">Gemini 1.5 Flash (free tier)</option>
                 <option value="claude">Claude API (cloud)</option>
               </select>
-              <div class="small mt-1" style="color:#555">
+              <div class="small mt-1 text-muted">
                 Gemini: 1,500 free calls/day — switch without restart
               </div>
             </div>
@@ -574,7 +565,7 @@ _HTML = """<!DOCTYPE html>
               <label class="small text-muted">Suppress Threshold (0.0–1.0)</label>
               <input type="number" id="set-sentiment_suppress_threshold" class="form-control mt-1"
                 step="0.05" min="0" max="1" placeholder="0.35">
-              <div class="small mt-1" style="color:#555">
+              <div class="small mt-1 text-muted">
                 Sentiment score above this suppresses conflicting signal
               </div>
             </div>
@@ -601,7 +592,7 @@ _HTML = """<!DOCTYPE html>
               <label class="small text-muted">FinBERT Service URL</label>
               <input type="text" id="set-sentiment_local_url" class="form-control mt-1"
                 placeholder="http://finbert:5001">
-              <div class="small mt-1" style="color:#555">
+              <div class="small mt-1 text-muted">
                 Change this when deploying to a different host
               </div>
             </div>
@@ -618,20 +609,20 @@ _HTML = """<!DOCTYPE html>
                 <option value="false">Disabled (no DM for outcomes)</option>
                 <option value="true">Enabled (send to admin DM)</option>
               </select>
-              <div class="small mt-1" style="color:#555">Outcome results are always visible in the dashboard</div>
+              <div class="small mt-1 text-muted">Outcome results are always visible in the dashboard</div>
             </div>
 
           </div>
           <div class="d-flex gap-3 align-items-center mt-3">
-            <button class="btn" style="background:#1a3a4a;color:#38bdf8;border:1px solid #38bdf840;padding:6px 20px"
+            <button class="btn" style="background:var(--surface2);color:var(--accent);border:1px solid var(--border);padding:6px 20px"
               onclick="saveSettings()">💾 Save Settings</button>
-            <div id="settings-msg" class="small" style="color:#8b8fa8"></div>
+            <div id="settings-msg" class="small text-muted"></div>
           </div>
 
           <!-- Per-symbol sentiment status -->
           <div class="mt-4">
-            <div class="section-head" style="color:var(--muted)">Current Sentiment Cache</div>
-            <div id="sentiment-status" style="font-size:.8rem"></div>
+            <div class="section-head" style="font-size:.74rem;color:var(--muted)">Current Sentiment Cache</div>
+            <div id="sentiment-status" style="font-size:.78rem"></div>
           </div>
         </div>
       </div>
@@ -641,7 +632,7 @@ _HTML = """<!DOCTYPE html>
       <div class="col-md-6">
         <div class="card p-3">
           <div class="section-head">⚙️ Watched Symbols</div>
-          <p class="small mb-2" style="color:#8b8fa8;font-size:.8rem">
+          <p class="small mb-2 text-muted">
             Changes take effect within 5 minutes.
           </p>
 
@@ -656,7 +647,7 @@ _HTML = """<!DOCTYPE html>
               <button class="btn btn-add px-3" onclick="addSymbol()">+ Add</button>
             </div>
             <div id="search-dropdown" class="position-absolute w-100 mt-1"
-              style="z-index:1000;display:none;background:#1a1d27;border:1px solid #2a2d3a;
+              style="z-index:1000;display:none;background:var(--surface);border:1px solid var(--border);
                      border-radius:6px;max-height:220px;overflow-y:auto"></div>
           </div>
           <div id="add-msg" class="small mb-2" style="min-height:1.2em"></div>
@@ -712,12 +703,12 @@ async function refreshOps() {
     actionSelect.innerHTML = '<option value="">Pick symbol</option>' + ops.active_symbols.map(sym => `<option value="${sym}">${sym}</option>`).join('');
   }
   const snapshot = [];
-  if (ops.last_action) snapshot.push(`Last action: ${ops.last_action.action}${ops.last_action.symbol ? ' ' + ops.last_action.symbol : ''} (${ops.last_action.status})`);
-  if (ops.last_train) snapshot.push(`Last train: ${ops.last_train.symbol} at ${new Date(ops.last_train.trained_at+'Z').toLocaleString()}`);
-  if (ops.last_outcome) snapshot.push(`Last outcome: ${ops.last_outcome.symbol} ${ops.last_outcome.outcome} via ${ops.last_outcome.resolution_reason || 'n/a'}`);
-  snapshot.push(`Tracked symbols: ${ops.active_symbol_count}`);
+  if (ops.last_action) snapshot.push(`Last action: <span style="color:var(--text)">${ops.last_action.action}${ops.last_action.symbol ? ' ' + ops.last_action.symbol : ''}</span> <span class="text-muted">(${ops.last_action.status})</span>`);
+  if (ops.last_train) snapshot.push(`Last train: <span style="color:var(--text)">${ops.last_train.symbol}</span> <span class="text-muted">at ${new Date(ops.last_train.trained_at+'Z').toLocaleString()}</span>`);
+  if (ops.last_outcome) snapshot.push(`Last outcome: <span style="color:var(--text)">${ops.last_outcome.symbol} ${ops.last_outcome.outcome}</span> <span class="text-muted">via ${ops.last_outcome.resolution_reason || 'n/a'}</span>`);
+  snapshot.push(`Tracked symbols: <span style="color:var(--text)">${ops.active_symbol_count}</span>`);
   const snapEl = document.getElementById('ops-snapshot');
-  if (snapEl) snapEl.innerHTML = snapshot.map(s => `<div class="mb-2">${s}</div>`).join('');
+  if (snapEl) snapEl.innerHTML = snapshot.map(s => `<div class="mb-1">${s}</div>`).join('');
 }
 
 async function runAction(action, symbol='') {
@@ -783,14 +774,14 @@ function accColor(acc) {
   return '#f87171';
 }
 function accBar(acc, total) {
-  if (!total) return '<span style="color:#555">no data</span>';
+  if (!total) return '<span class="text-muted">no data</span>';
   const cls = acc >= 60 ? 'accuracy-bar-high' : (acc >= 50 ? 'accuracy-bar-mid' : 'accuracy-bar-low');
   return `<div class="d-flex align-items-center gap-2">
     <div class="progress flex-grow-1" style="height:6px">
       <div class="progress-bar ${cls}" style="width:${acc}%"></div>
     </div>
     <span style="color:${accColor(acc)};min-width:42px;text-align:right">${acc}%</span>
-    <span style="color:#555;font-size:.75rem">(${total})</span>
+    <span class="text-muted" style="font-size:.75rem">(${total})</span>
   </div>`;
 }
 
@@ -930,25 +921,25 @@ async function refreshML() {
     const samples   = tr ? tr.train_samples : null;
     const bwr = d.bootstrap_win_rate != null
       ? `<span style="color:${d.bootstrap_win_rate>=54?'#4ade80':d.bootstrap_win_rate>=50?'#fbbf24':'#f87171'};font-weight:600">${d.bootstrap_win_rate}%</span>
-         <div style="color:#555;font-size:.70rem">${d.bootstrap_correct||0}✓ ${d.bootstrap_incorrect||0}✗ · ${d.bootstrap_samples||0} samples</div>`
-      : '<span style="color:#555">—</span>';
+         <div class="text-muted" style="font-size:.70rem">${d.bootstrap_correct||0}✓ ${d.bootstrap_incorrect||0}✗ · ${d.bootstrap_samples||0} samples</div>`
+      : '<span class="text-muted">—</span>';
     const mkCell = (total, acc, minN) => {
-      if (!total) return '<span style="color:#555">—</span>';
+      if (!total) return '<span class="text-muted">—</span>';
       if (total < minN) {
         const pct = Math.round(total / minN * 100);
-        return `<div style="color:#8b8fa8;font-size:.72rem;margin-bottom:2px">${total} signal${total!==1?'s':''}</div>
+        return `<div class="text-muted" style="font-size:.72rem;margin-bottom:2px">${total} signal${total!==1?'s':''}</div>
                 <div class="d-flex align-items-center gap-1">
-                  <div class="progress flex-grow-1" style="height:4px"><div class="progress-bar" style="width:${pct}%;background:#555"></div></div>
-                  <span style="color:#555;font-size:.70rem">${total}/${minN}</span>
+                  <div class="progress flex-grow-1" style="height:4px"><div class="progress-bar" style="width:${pct}%;background:var(--dim)"></div></div>
+                  <span class="text-muted" style="font-size:.70rem">${total}/${minN}</span>
                 </div>`;
       }
-      return `<div style="color:#8b8fa8;font-size:.72rem;margin-bottom:2px">${total} signal${total!==1?'s':''}</div>
+      return `<div class="text-muted" style="font-size:.72rem;margin-bottom:2px">${total} signal${total!==1?'s':''}</div>
               ${accBar(acc, total)}`;
     };
     const trainCell = trainedAt
-      ? `<div style="font-size:.74rem;color:#8b8fa8">${trainedAt}</div>
-         <div style="font-size:.70rem;color:#555">${samples} samples · ${d.train_runs||0} run${d.train_runs!==1?'s':''}</div>`
-      : '<span style="color:#555">—</span>';
+      ? `<div class="text-muted" style="font-size:.74rem">${trainedAt}</div>
+         <div class="text-muted" style="font-size:.70rem">${samples} samples · ${d.train_runs||0} run${d.train_runs!==1?'s':''}</div>`
+      : '<span class="text-muted">—</span>';
     return `<tr>
       <td><span class="sym-tag">${sym}</span></td>
       <td>${bwr}</td>
@@ -1003,10 +994,7 @@ async function refreshML() {
     trainRunsChart.data.datasets[0].data = runValues;
     trainRunsChart.update();
   }
-  document.getElementById('ml-confidence-note').textContent =
-    (summary.ai_resolved_signals || 0) > 0
-      ? `Current AI threshold is 65%. Low-looking confidence usually means limited resolved training data, not necessarily a broken model.`
-      : 'No resolved AI-backed signals yet. Confidence quality improves after the bot accumulates validated outcomes.';
+  // ml-confidence-note removed from DOM — no-op
 }
 
 // ── Admin ─────────────────────────────────────────────────────────────────────
@@ -1027,7 +1015,7 @@ async function loadSettings() {
     ? `<div class="d-flex flex-wrap gap-2">${cache.map(c => {
         const color = labelColor[c.label] || '#8b8fa8';
         const age = c.computed_at ? Math.round((Date.now() - new Date(c.computed_at+'Z')) / 60000) + 'm ago' : '—';
-        return `<div style="background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:4px 10px">
+        return `<div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:4px 10px">
           <span class="sym-tag">${c.symbol}</span>
           <span style="color:${color};margin-left:6px">${c.label}</span>
           <span style="color:#555;font-size:.72rem;margin-left:4px">${c.score > 0 ? '+' : ''}${(c.score||0).toFixed(2)} · ${age}</span>
@@ -1104,7 +1092,7 @@ async function refreshAdmin() {
         <option value="xetra" ${mkt==='xetra'?'selected':''}>🇩🇪 XETRA</option>
         <option value="crypto" ${mkt==='crypto'?'selected':''}>₿ Crypto 24/7</option>
       </select>`;
-    return `<div class="d-flex align-items-center mb-2 p-2 gap-1" style="background:#0f1117;border-radius:6px;flex-wrap:wrap">
+    return `<div class="d-flex align-items-center mb-2 p-2 gap-1" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;flex-wrap:wrap">
       <span class="sym-tag">${s.symbol}</span>${statusBadge}
       ${marketSel}
       <span class="ms-auto text-muted" style="font-size:.70rem">${s.added_at.slice(0,10)}</span>
@@ -1135,12 +1123,12 @@ function searchSymbol(q) {
     dd.innerHTML = res.map(item => `
       <div class="d-flex align-items-center gap-2 px-3 py-2 search-row"
         style="cursor:pointer;border-bottom:1px solid #2a2d3a"
-        onmouseover="this.style.background='#0f1117'"
+        onmouseover="this.style.background='var(--surface2)'"
         onmouseout="this.style.background=''"
         onclick="selectSymbol('${item.symbol}')">
         <span class="sym-tag" style="min-width:70px">${item.symbol}</span>
-        <span style="color:#e0e0e0;font-size:.82rem">${item.name}</span>
-        <span class="ms-auto" style="color:#555;font-size:.72rem">${item.exchange} · ${item.type}</span>
+        <span style="color:var(--text);font-size:.82rem">${item.name}</span>
+        <span class="ms-auto text-muted" style="font-size:.72rem">${item.exchange} · ${item.type}</span>
       </div>`).join('');
     dd.style.display='block';
   }, 300);
@@ -1592,6 +1580,11 @@ document.querySelectorAll('[data-bs-target="#tab-ml"]').forEach(el =>
 );
 document.querySelectorAll('[data-bs-target="#tab-activity"]').forEach(el =>
   el.addEventListener('shown.bs.tab', () => { refreshActivity(); refreshJobs(); })
+);
+document.querySelectorAll('[data-bs-target="#lt-analytics"]').forEach(el =>
+  el.addEventListener('shown.bs.tab', () => {
+    [resolutionReasonsChart, resolutionTimeChart, mfeMaeChart].forEach(c => c && c.resize());
+  })
 );
 document.querySelectorAll('[data-bs-target="#tab-admin"]').forEach(el =>
   el.addEventListener('shown.bs.tab', () => { refreshAdmin(); loadSettings(); })
