@@ -872,15 +872,6 @@ async function refreshOverview() {
     });
   } else { symbolChart.data.labels=syms; symbolChart.data.datasets[0].data=accs; symbolChart.update(); }
 
-  document.getElementById('leaderboard-body').innerHTML =
-    (stats.top_pnl||[]).map(u => {
-      const avg = u.avg_pnl?u.avg_pnl.toFixed(2):'0.00';
-      const sign = u.avg_pnl>=0?'+':'';
-      const color = u.avg_pnl>=0?'#4ade80':'#f87171';
-      const name = u.username?'@'+u.username:u.chat_id;
-      return `<tr><td>${name}</td><td>${u.trades}</td><td style="color:${color}">${sign}${avg}%</td></tr>`;
-    }).join('') || '<tr><td colspan="3" class="text-center" style="color:#555">No closed trades yet</td></tr>';
-
   document.getElementById('signals-body').innerHTML = signals.map(s=>`<tr>
     <td style="white-space:nowrap;color:var(--muted)">${formatShortTime(s.sent_at)}</td>
     <td><span class="sym-tag">${s.symbol}</span></td>
@@ -1593,6 +1584,9 @@ setInterval(refreshOverview, 30000);
 setInterval(refreshOps, 30000);
 setInterval(updateMarketStatus, 60000);
 
+document.querySelectorAll('[data-bs-target="#tab-overview"]').forEach(el =>
+  el.addEventListener('shown.bs.tab', () => refreshOverview())
+);
 document.querySelectorAll('[data-bs-target="#tab-ml"]').forEach(el =>
   el.addEventListener('shown.bs.tab', () => refreshML())
 );
