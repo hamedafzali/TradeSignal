@@ -611,7 +611,9 @@ def get_stats() -> dict:
                    SUM(CASE WHEN outcome='correct'   THEN 1 ELSE 0 END) AS correct,
                    SUM(CASE WHEN outcome='incorrect' THEN 1 ELSE 0 END) AS incorrect,
                    SUM(CASE WHEN outcome='neutral'   THEN 1 ELSE 0 END) AS neutral
-            FROM signals GROUP BY symbol
+            FROM signals
+            WHERE symbol IN (SELECT symbol FROM symbols WHERE active=1)
+            GROUP BY symbol
         """).fetchall()
         per_symbol = {}
         for r in symbol_rows:
@@ -625,13 +627,17 @@ def get_stats() -> dict:
 
         daily_rows = conn.execute("""
             SELECT DATE(sent_at) AS day, COUNT(*) AS count
-            FROM signals WHERE sent_at >= DATE('now', '-14 days')
+            FROM signals
+            WHERE sent_at >= DATE('now', '-14 days')
+              AND symbol IN (SELECT symbol FROM symbols WHERE active=1)
             GROUP BY day ORDER BY day
         """).fetchall()
 
-        buy_sell = conn.execute(
-            "SELECT action, COUNT(*) AS cnt FROM signals GROUP BY action"
-        ).fetchall()
+        buy_sell = conn.execute("""
+            SELECT action, COUNT(*) AS cnt FROM signals
+            WHERE symbol IN (SELECT symbol FROM symbols WHERE active=1)
+            GROUP BY action
+        """).fetchall()
 
         top_pnl = conn.execute("""
             SELECT u.username, u.chat_id,
@@ -667,7 +673,9 @@ def get_weekly_stats() -> dict:
                    SUM(CASE WHEN outcome='correct'   THEN 1 ELSE 0 END) AS correct,
                    SUM(CASE WHEN outcome='incorrect' THEN 1 ELSE 0 END) AS incorrect,
                    SUM(CASE WHEN outcome='neutral'   THEN 1 ELSE 0 END) AS neutral
-            FROM signals WHERE sent_at >= ?
+            FROM signals
+            WHERE sent_at >= ?
+              AND symbol IN (SELECT symbol FROM symbols WHERE active=1)
             GROUP BY symbol, action
         """, (cutoff,)).fetchall()
         total = conn.execute(
@@ -911,6 +919,7 @@ def get_ml_accuracy_stats() -> dict:
             FROM signals
             WHERE outcome IN ('correct', 'incorrect')
               AND ai_confidence IS NOT NULL
+              AND symbol IN (SELECT symbol FROM symbols WHERE active=1)
             ORDER BY sent_at
         """).fetchall()
 
@@ -1108,6 +1117,7 @@ def get_ml_activity_log(limit: int = 40, symbol: str | None = None,
                    max_favorable_pct, max_adverse_pct
             FROM signals
             WHERE outcome IN ('correct', 'incorrect', 'neutral')
+              AND symbol IN (SELECT symbol FROM symbols WHERE active=1)
             {extra_where}
             ORDER BY outcome_at DESC LIMIT 60
         """.format(
@@ -1361,7 +1371,9 @@ def get_recent_signals(limit: int = 50) -> list[dict]:
         rows = conn.execute("""
             SELECT id, symbol, action, strength, price, rsi, ai_confidence,
                    reasons, sent_at, outcome, outcome_price, outcome_at
-            FROM signals ORDER BY sent_at DESC LIMIT ?
+            FROM signals
+            WHERE symbol IN (SELECT symbol FROM symbols WHERE active=1)
+            ORDER BY sent_at DESC LIMIT ?
         """, (limit,)).fetchall()
         result = []
         for r in rows:
