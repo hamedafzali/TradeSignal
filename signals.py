@@ -4,44 +4,98 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import yfinance as yf
 
-ET = ZoneInfo("America/New_York")
-_MARKET_OPEN = time(9, 30)
-_MARKET_CLOSE = time(16, 0)
+ET  = ZoneInfo("America/New_York")
+CET = ZoneInfo("Europe/Berlin")
+
+# US NYSE/NASDAQ
+_US_OPEN  = time(9, 30)
+_US_CLOSE = time(16, 0)
+
+# XETRA / Frankfurt (Deutsche Börse) — CET/CEST
+_XETRA_OPEN  = time(9, 0)
+_XETRA_CLOSE = time(17, 30)
 
 # Crypto tickers trade 24/7 — no market hours restriction
 _CRYPTO_SYMBOLS = {"BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD",
                    "ADA-USD", "DOGE-USD", "AVAX-USD", "MATIC-USD", "DOT-USD"}
+
+# Suffixes that indicate a European-listed stock
+_XETRA_SUFFIXES = (".DE", ".F", ".XETRA", ".AS", ".PA", ".MI", ".BR", ".LS", ".MC")
 
 
 def is_crypto(symbol: str) -> bool:
     return symbol.upper() in _CRYPTO_SYMBOLS or symbol.upper().endswith("-USD")
 
 
+def detect_market(symbol: str) -> str:
+    """Auto-detect market from symbol. Returns 'us', 'xetra', or 'crypto'."""
+    s = symbol.upper()
+    if is_crypto(s):
+        return "crypto"
+    for suffix in _XETRA_SUFFIXES:
+        if s.endswith(suffix.upper()):
+            return "xetra"
+    return "us"
+
+
+def get_symbol_market(symbol: str) -> str:
+    """Return the market for a symbol, checking DB override first, then auto-detect."""
+    try:
+        from database import get_symbol_market as _db_market
+        stored = _db_market(symbol)
+        if stored:
+            return stored
+    except Exception:
+        pass
+    return detect_market(symbol)
+
+
 # ── Market hours ──────────────────────────────────────────────────────────────
 
 def is_market_open(symbol: str = "") -> bool:
-    if is_crypto(symbol):
-        return True
     from datetime import datetime
+    market = get_symbol_market(symbol)
+    if market == "crypto":
+        return True
+    if market == "xetra":
+        now = datetime.now(CET)
+        if now.weekday() >= 5:
+            return False
+        return _XETRA_OPEN <= now.time() <= _XETRA_CLOSE
+    # us
     now = datetime.now(ET)
     if now.weekday() >= 5:
         return False
-    return _MARKET_OPEN <= now.time() <= _MARKET_CLOSE
+    return _US_OPEN <= now.time() <= _US_CLOSE
 
 
 def market_session(symbol: str = "") -> str:
-    if is_crypto(symbol):
-        return "open"
     from datetime import datetime
+    market = get_symbol_market(symbol)
+    if market == "crypto":
+        return "open"
+    if market == "xetra":
+        now = datetime.now(CET)
+        if now.weekday() >= 5:
+            return "closed"
+        t = now.time()
+        if t < time(8, 0):
+            return "closed"
+        if t < _XETRA_OPEN:
+            return "pre"
+        if t <= _XETRA_CLOSE:
+            return "open"
+        return "after"
+    # us
     now = datetime.now(ET)
     if now.weekday() >= 5:
         return "closed"
     t = now.time()
     if t < time(4, 0):
         return "closed"
-    if t < _MARKET_OPEN:
+    if t < _US_OPEN:
         return "pre"
-    if t <= _MARKET_CLOSE:
+    if t <= _US_CLOSE:
         return "open"
     return "after"
 

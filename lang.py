@@ -351,8 +351,12 @@ def _signal_beginner(sig: dict, lang: str, action_emoji: str) -> str:
     ql = _quality_label(quality, lang)
     rrl = _rr_label(rr, lang)
 
+    tp_abs = abs(tp_pct)
+    sl_abs = abs(sl_pct)
+
     if lang == "fa":
         action_word = "خرید" if action == "BUY" else "فروش"
+        entry_label = "قیمت خرید" if action == "BUY" else "قیمت فروش"
         strength_tip = {
             "STRONG": "هوش مصنوعی و تحلیل تکنیکال هر دو این سیگنال را تأیید کردند.",
             "AI": "هوش مصنوعی این الگو را شناسایی کرد.",
@@ -362,9 +366,9 @@ def _signal_beginner(sig: dict, lang: str, action_emoji: str) -> str:
         return (
             f"{action_emoji} *سیگنال {action_word} — {symbol}*\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
-            f"💰 قیمت خرید:    `${price:.2f}`\n"
-            f"🎯 هدف قیمتی:    `${tp:.2f}`  *(سود +{tp_pct:.1f}٪)*\n"
-            f"🛑 حد ضرر:       `${sl:.2f}`  *(ضرر {sl_pct:.1f}٪)*\n"
+            f"💰 {entry_label}:    `${price:.2f}`\n"
+            f"🎯 هدف قیمتی:    `${tp:.2f}`  *(سود +{tp_abs:.1f}٪)*\n"
+            f"🛑 حد ضرر:       `${sl:.2f}`  *(ضرر {sl_abs:.1f}٪)*\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"⚖️ نسبت سود به ریسک: {rrl}\n"
             f"⭐ قدرت سیگنال: {stars} *{ql}*\n"
@@ -374,6 +378,7 @@ def _signal_beginner(sig: dict, lang: str, action_emoji: str) -> str:
         )
     else:
         action_word = "BUY" if action == "BUY" else "SELL"
+        entry_label = "Buy at:" if action == "BUY" else "Sell at:"
         strength_tip = {
             "STRONG": "Both AI and technical rules agree on this signal.",
             "AI": "AI model detected this pattern with high confidence.",
@@ -383,9 +388,9 @@ def _signal_beginner(sig: dict, lang: str, action_emoji: str) -> str:
         return (
             f"{action_emoji} *{action_word} Signal — {symbol}*\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
-            f"💰 Buy at:    `${price:.2f}`\n"
-            f"🎯 Target:    `${tp:.2f}`  *(you gain +{tp_pct:.1f}%)*\n"
-            f"🛑 Stop loss: `${sl:.2f}`  *(max loss {sl_pct:.1f}%)*\n"
+            f"💰 {entry_label}    `${price:.2f}`\n"
+            f"🎯 Target:    `${tp:.2f}`  *(profit +{tp_abs:.1f}%)*\n"
+            f"🛑 Stop loss: `${sl:.2f}`  *(max loss {sl_abs:.1f}%)*\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"⚖️ Risk/Reward: {rrl}\n"
             f"⭐ Signal strength: {stars} *{ql}*\n"

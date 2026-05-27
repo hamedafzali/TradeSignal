@@ -186,6 +186,10 @@ def init_db() -> None:
         for col, sql_type in train_migrations.items():
             if col not in train_cols:
                 conn.execute(f"ALTER TABLE ml_training_log ADD COLUMN {col} {sql_type}")
+        # Add market column to symbols if missing
+        sym_cols = [r[1] for r in conn.execute("PRAGMA table_info(symbols)").fetchall()]
+        if "market" not in sym_cols:
+            conn.execute("ALTER TABLE symbols ADD COLUMN market TEXT")
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────
@@ -773,9 +777,27 @@ def remove_symbol(symbol: str) -> bool:
 def get_all_symbols_with_status() -> list[dict]:
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT symbol, active, added_at, added_by FROM symbols ORDER BY added_at"
+            "SELECT symbol, active, added_at, added_by, market FROM symbols ORDER BY added_at"
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def get_symbol_market(symbol: str) -> str | None:
+    """Return stored market override for symbol, or None if not set."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT market FROM symbols WHERE symbol = ?", (symbol.upper(),)
+        ).fetchone()
+        return row["market"] if row else None
+
+
+def set_symbol_market(symbol: str, market: str) -> None:
+    """Set market type for a symbol: 'us', 'xetra', or 'crypto'."""
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE symbols SET market = ? WHERE symbol = ?",
+            (market or None, symbol.upper())
+        )
 
 
 # ── ML training log ───────────────────────────────────────────────────────────

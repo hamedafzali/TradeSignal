@@ -10,6 +10,7 @@ from database import (
     create_action_request, get_ops_snapshot,
     get_running_training_job, get_recent_training_jobs,
     get_all_settings, set_setting, get_all_sentiment_cache,
+    set_symbol_market,
 )
 
 app = Flask(__name__)
@@ -45,8 +46,8 @@ _HTML = """<!DOCTYPE html>
   }
   body { background:#0f1117; color:#e0e0e0; }
   .card { background:#1a1d27; border:1px solid #2a2d3a; }
-  .card-title { color:#8b8fa8; font-size:.75rem; text-transform:uppercase; letter-spacing:.08em; }
-  .stat-val { font-size:2rem; font-weight:700; }
+  .card-title { color:#8b8fa8; font-size:.72rem; text-transform:uppercase; letter-spacing:.08em; }
+  .stat-val { font-size:1.45rem; font-weight:700; }
   .badge-correct   { background:#1a4a2e; color:#4ade80; }
   .badge-incorrect { background:#4a1a1a; color:#f87171; }
   .badge-pending   { background:#2a2d3a; color:#8b8fa8; }
@@ -58,13 +59,14 @@ _HTML = """<!DOCTYPE html>
   .badge-RULE  { background:#1a2a1a; color:#4ade80; }
   .badge-active  { background:#1a4a2e; color:#4ade80; }
   .badge-inactive{ background:#4a1a1a; color:#f87171; }
-  table { font-size:.85rem; }
-  thead th { color:#8b8fa8; border-color:#2a2d3a !important; }
-  tbody td { border-color:#2a2d3a !important; }
-  .refresh-note { color:#555; font-size:.75rem; }
-  .nav-tabs .nav-link { color:#8b8fa8; border-color:#2a2d3a; }
-  .nav-tabs .nav-link.active { color:#e0e0e0; background:#1a1d27; border-color:#2a2d3a #2a2d3a #1a1d27; }
-  .nav-tabs { border-color:#2a2d3a; }
+  table { font-size:.82rem; }
+  thead th { color:#8b8fa8; border-color:#2a2d3a !important; font-size:.75rem; text-transform:uppercase; letter-spacing:.04em; font-weight:600; }
+  tbody td { border-color:#2a2d3a !important; vertical-align:middle; }
+  .refresh-note { color:#555; font-size:.74rem; }
+  .nav-tabs { border-bottom:1px solid #2a2d3a; }
+  .nav-tabs .nav-link { color:#555; border:none; border-bottom:2px solid transparent; padding:7px 14px; font-size:.84rem; background:transparent; border-radius:0; }
+  .nav-tabs .nav-link:hover { color:#8b8fa8; border-bottom-color:#3a3d4a; background:transparent; }
+  .nav-tabs .nav-link.active { color:#e0e0e0; background:transparent; border-color:transparent; border-bottom:2px solid #38bdf8; }
   .progress { background:#2a2d3a; height:8px; }
   .accuracy-bar-high { background:#4ade80; }
   .accuracy-bar-mid  { background:#fbbf24; }
@@ -94,7 +96,7 @@ _HTML = """<!DOCTYPE html>
   /* Modal */
   .modal-content { background:#1a1d27; color:#e0e0e0; border-color:#2a2d3a; }
   .modal-header, .modal-footer { border-color:#2a2d3a; }
-  .health-card { background:#0f1117; border-radius:8px; padding:14px 16px; border:1px solid #2a2d3a; }
+  .health-card { background:#0f1117; border-radius:6px; padding:10px 12px; border:1px solid #2a2d3a; }
   .trend-up   { color:#4ade80 }
   .trend-down { color:#f87171 }
   .trend-flat { color:#fbbf24 }
@@ -111,10 +113,10 @@ _HTML = """<!DOCTYPE html>
   .sug-warn  { border-color:#f8717140; background:#4a1a1a22; }
   .sug-ok    { border-color:#4ade8040; background:#1a4a2e22; }
   .sug-info  { border-color:#38bdf840; background:#1a2d3a22; }
-  .ops-card { background:#0f1117; border:1px solid #2a2d3a; border-radius:10px; padding:14px 16px; min-height:112px; }
-  .ops-label { color:#8b8fa8; font-size:.74rem; text-transform:uppercase; letter-spacing:.08em; }
-  .ops-value { color:#ffffff; font-size:1.4rem; font-weight:700; margin-top:4px; }
-  .ops-meta { color:#555; font-size:.75rem; margin-top:8px; line-height:1.5; }
+  .ops-card { background:#0f1117; border:1px solid #2a2d3a; border-radius:8px; padding:10px 14px; min-height:72px; }
+  .ops-label { color:#8b8fa8; font-size:.70rem; text-transform:uppercase; letter-spacing:.08em; }
+  .ops-value { color:#ffffff; font-size:1.0rem; font-weight:700; margin-top:2px; }
+  .ops-meta { color:#555; font-size:.72rem; margin-top:4px; line-height:1.4; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .action-btn { width:100%; text-align:left; background:#0f1117; color:#e0e0e0; border:1px solid #2a2d3a; }
   .action-btn:hover { background:#141824; color:#fff; border-color:#38bdf8; }
   .status-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
@@ -124,17 +126,19 @@ _HTML = """<!DOCTYPE html>
 </style>
 </head>
 <body>
-<div class="container-fluid py-4 px-4">
-  <div class="d-flex justify-content-between align-items-center mb-4">
-    <h4 class="mb-0">📈 Trading Signal Dashboard</h4>
+<div class="container-fluid py-3 px-3">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <div class="d-flex align-items-center gap-2">
+      <span style="font-size:1.1rem;font-weight:700;color:#e0e0e0">📈 Trade Signals</span>
+    </div>
     <span class="refresh-note" id="last-refresh"></span>
   </div>
 
   <!-- Tab navigation -->
-  <ul class="nav nav-tabs mb-4" id="mainTabs">
-    <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-overview">Overview</button></li>
+  <ul class="nav nav-tabs mb-3" id="mainTabs">
+    <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-overview">📊 Overview</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-ml">🧠 ML Accuracy</button></li>
-    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-activity">🔄 Learning Activity</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-activity">🔄 Learning</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-admin">⚙️ Admin</button></li>
   </ul>
 
@@ -143,34 +147,47 @@ _HTML = """<!DOCTYPE html>
   <!-- ── OVERVIEW TAB ─────────────────────────────────────────────────── -->
   <div class="tab-pane fade show active" id="tab-overview">
 
-    <div class="row g-3 mb-4">
-      <div class="col-md-3"><div class="ops-card"><div class="ops-label">Signal Engine</div><div class="ops-value" id="ops-signal-status">—</div><div class="ops-meta" id="ops-last-signal">No signal activity yet</div></div></div>
-      <div class="col-md-3"><div class="ops-card"><div class="ops-label">Learning Engine</div><div class="ops-value" id="ops-learning-status">—</div><div class="ops-meta" id="ops-last-learning">No learning cycles yet</div></div></div>
-      <div class="col-md-3"><div class="ops-card"><div class="ops-label">Pending Work</div><div class="ops-value" id="ops-pending-work">—</div><div class="ops-meta" id="ops-pending-meta">No queued actions</div></div></div>
-      <div class="col-md-3"><div class="ops-card"><div class="ops-label">Coverage</div><div class="ops-value" id="ops-coverage">—</div><div class="ops-meta" id="ops-coverage-meta">No watched symbols yet</div></div></div>
+    <div class="row g-2 mb-3">
+      <div class="col-6 col-md-3"><div class="ops-card"><div class="ops-label">Signal Engine</div><div class="ops-value" id="ops-signal-status">—</div><div class="ops-meta" id="ops-last-signal">No signal activity yet</div></div></div>
+      <div class="col-6 col-md-3"><div class="ops-card"><div class="ops-label">Learning Engine</div><div class="ops-value" id="ops-learning-status">—</div><div class="ops-meta" id="ops-last-learning">No learning cycles yet</div></div></div>
+      <div class="col-6 col-md-3"><div class="ops-card"><div class="ops-label">Pending Work</div><div class="ops-value" id="ops-pending-work">—</div><div class="ops-meta" id="ops-pending-meta">No queued actions</div></div></div>
+      <div class="col-6 col-md-3"><div class="ops-card"><div class="ops-label">Coverage</div><div class="ops-value" id="ops-coverage">—</div><div class="ops-meta" id="ops-coverage-meta">No watched symbols yet</div></div></div>
     </div>
 
-    <div class="row g-3 mb-4">
-      <div class="col-6 col-md-3"><div class="card p-3"><div class="card-title">Total Users</div><div class="stat-val" id="s-users">—</div></div></div>
-      <div class="col-6 col-md-3"><div class="card p-3"><div class="card-title">Total Signals</div><div class="stat-val" id="s-total">—</div></div></div>
-      <div class="col-6 col-md-3"><div class="card p-3"><div class="card-title">Signals Today</div><div class="stat-val" id="s-today">—</div></div></div>
-      <div class="col-6 col-md-3"><div class="card p-3"><div class="card-title">Accuracy</div><div class="stat-val" id="s-acc">—</div></div></div>
+    <!-- Market status bar -->
+    <div class="row g-2 mb-3">
+      <div class="col-12">
+        <div class="card p-2 px-3 d-flex flex-row align-items-center gap-3 flex-wrap" style="font-size:.8rem">
+          <span style="color:#555;font-size:.72rem;text-transform:uppercase;letter-spacing:.06em">Markets</span>
+          <span id="market-us"></span>
+          <span id="market-xetra"></span>
+          <span id="market-crypto"></span>
+          <span class="ms-auto" style="color:#555;font-size:.70rem" id="market-times"></span>
+        </div>
+      </div>
     </div>
 
-    <div class="row g-3 mb-4">
-      <div class="col-md-6"><div class="card p-3"><canvas id="chart-daily" height="160"></canvas></div></div>
-      <div class="col-md-6"><div class="card p-3"><canvas id="chart-symbol" height="160"></canvas></div></div>
+    <div class="row g-2 mb-3">
+      <div class="col-6 col-md-3"><div class="card p-2 px-3"><div class="card-title mb-1">Total Users</div><div class="stat-val" id="s-users">—</div></div></div>
+      <div class="col-6 col-md-3"><div class="card p-2 px-3"><div class="card-title mb-1">Total Signals</div><div class="stat-val" id="s-total">—</div></div></div>
+      <div class="col-6 col-md-3"><div class="card p-2 px-3"><div class="card-title mb-1">Signals Today</div><div class="stat-val" id="s-today">—</div></div></div>
+      <div class="col-6 col-md-3"><div class="card p-2 px-3"><div class="card-title mb-1">Accuracy</div><div class="stat-val" id="s-acc">—</div></div></div>
     </div>
 
-    <div class="row g-3 mb-4">
+    <div class="row g-2 mb-3">
+      <div class="col-md-6"><div class="card p-3"><canvas id="chart-daily" height="110"></canvas></div></div>
+      <div class="col-md-6"><div class="card p-3"><canvas id="chart-symbol" height="110"></canvas></div></div>
+    </div>
+
+    <div class="row g-2 mb-3">
       <div class="col-md-8">
         <div class="card p-3">
-          <h6 class="mb-3">Recent Signals</h6>
+          <h6 class="mb-2" style="font-size:.85rem">Recent Signals</h6>
           <div class="table-responsive">
             <table class="table table-dark table-hover mb-0">
               <thead><tr>
-                <th>Time</th><th>Symbol</th><th>Action</th><th>Strength</th>
-                <th>Price</th><th>RSI</th><th>AI Conf.</th><th>Outcome</th><th>Exit Price</th>
+                <th>Time</th><th>Symbol</th><th>Action</th><th>Type</th>
+                <th>Price</th><th>RSI</th><th>AI%</th><th>Outcome</th>
               </tr></thead>
               <tbody id="signals-body"></tbody>
             </table>
@@ -179,7 +196,7 @@ _HTML = """<!DOCTYPE html>
       </div>
       <div class="col-md-4">
         <div class="card p-3 h-100">
-          <h6 class="mb-3">🏆 Top Traders</h6>
+          <h6 class="mb-2" style="font-size:.85rem">🏆 Top Traders</h6>
           <table class="table table-dark table-hover mb-0">
             <thead><tr><th>User</th><th>Trades</th><th>Avg P&L</th></tr></thead>
             <tbody id="leaderboard-body"></tbody>
@@ -192,39 +209,38 @@ _HTML = """<!DOCTYPE html>
   <!-- ── ML ACCURACY TAB ──────────────────────────────────────────────── -->
   <div class="tab-pane fade" id="tab-ml">
 
-    <div class="row g-3 mb-4">
-      <div class="col-6 col-md-3"><div class="ops-card"><div class="ops-label">Active Models</div><div class="ops-value" id="ml-active-models">—</div><div class="ops-meta">Configured symbols in the learning universe</div></div></div>
-      <div class="col-6 col-md-3"><div class="ops-card"><div class="ops-label">Trained Models</div><div class="ops-value" id="ml-trained-models">—</div><div class="ops-meta">Models with at least one successful training run</div></div></div>
-      <div class="col-6 col-md-3"><div class="ops-card"><div class="ops-label">AI Resolved Signals</div><div class="ops-value" id="ml-resolved-ai">—</div><div class="ops-meta">Resolved outcomes where AI contributed confidence</div></div></div>
-      <div class="col-6 col-md-3"><div class="ops-card"><div class="ops-label">Avg AI Accuracy</div><div class="ops-value" id="ml-avg-acc">—</div><div class="ops-meta">Cross-symbol mean of available AI accuracy</div></div></div>
+    <div class="row g-2 mb-3">
+      <div class="col-6 col-md-3"><div class="ops-card"><div class="ops-label">Active Models</div><div class="ops-value" id="ml-active-models">—</div><div class="ops-meta">Symbols in learning universe</div></div></div>
+      <div class="col-6 col-md-3"><div class="ops-card"><div class="ops-label">Trained Models</div><div class="ops-value" id="ml-trained-models">—</div><div class="ops-meta">At least one successful train run</div></div></div>
+      <div class="col-6 col-md-3"><div class="ops-card"><div class="ops-label">AI Resolved</div><div class="ops-value" id="ml-resolved-ai">—</div><div class="ops-meta">Outcomes with AI confidence</div></div></div>
+      <div class="col-6 col-md-3"><div class="ops-card"><div class="ops-label">Avg AI Accuracy</div><div class="ops-value" id="ml-avg-acc">—</div><div class="ops-meta">Cross-symbol mean</div></div></div>
     </div>
 
-    <div class="row g-3 mb-4">
+    <div class="row g-2 mb-3">
       <div class="col-12">
         <div class="card p-3">
-          <h6 class="mb-3">AI Confidence vs Accuracy</h6>
-          <p class="text-muted small mb-3">
-            How accurate the model is at different confidence levels.
-            Higher confidence should mean higher accuracy if the model is working well.
+          <h6 class="mb-1" style="font-size:.85rem">AI Confidence vs Accuracy</h6>
+          <p class="text-muted small mb-2" style="font-size:.78rem">
+            How accurate the model is at different confidence levels — higher confidence should correlate with higher accuracy.
           </p>
-          <canvas id="chart-buckets" height="100"></canvas>
+          <canvas id="chart-buckets" height="80"></canvas>
         </div>
       </div>
     </div>
 
-    <div class="row g-3 mb-4">
+    <div class="row g-2 mb-3">
       <div class="col-12">
         <div class="card p-3">
-          <h6 class="mb-3">Per-Symbol ML Performance</h6>
+          <h6 class="mb-2" style="font-size:.85rem">Per-Symbol ML Performance</h6>
           <div class="table-responsive">
             <table class="table table-dark table-hover mb-0" id="ml-table">
               <thead><tr>
                 <th>Symbol</th>
-                <th title="Historical win rate from bootstrap training">Bootstrap Win Rate</th>
-                <th>AI Signals</th><th>AI Accuracy</th>
-                <th>STRONG Signals</th><th>STRONG Accuracy</th>
-                <th>Rule Only</th><th>Rule Accuracy</th>
-                <th>Last Trained</th><th>Train Samples</th><th>Runs</th>
+                <th title="Historical win rate from bootstrap backtest">Bootstrap WR</th>
+                <th title="AI-filtered signals and their live accuracy">AI Signals</th>
+                <th title="Rule+AI agreement signals">STRONG</th>
+                <th title="Rule engine only signals">Rule-Only</th>
+                <th title="Last training run details">Training</th>
               </tr></thead>
               <tbody id="ml-body"></tbody>
             </table>
@@ -233,45 +249,42 @@ _HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <div class="row g-3 mb-4">
+    <div class="row g-2 mb-3">
       <div class="col-md-6">
         <div class="card p-3">
-          <h6 class="mb-3">Signal Type Breakdown</h6>
-          <canvas id="chart-strength" height="200"></canvas>
+          <h6 class="mb-2" style="font-size:.85rem">Signal Type Breakdown</h6>
+          <canvas id="chart-strength" height="140"></canvas>
         </div>
       </div>
       <div class="col-md-6">
         <div class="card p-3">
-          <h6 class="mb-3">Training Runs by Symbol</h6>
-          <canvas id="chart-train-runs" height="200"></canvas>
+          <h6 class="mb-2" style="font-size:.85rem">Training Runs by Symbol</h6>
+          <canvas id="chart-train-runs" height="140"></canvas>
         </div>
       </div>
     </div>
 
-    <div class="row g-3 mb-4">
+    <div class="row g-2 mb-3">
       <div class="col-md-6">
         <div class="card p-3">
-          <h6 class="mb-1">How Training Works</h6>
-          <p class="small mt-2" style="color:#8b8fa8; line-height:1.7">
-            <strong style="color:#4ade80">Every 10 minutes</strong>, the bot checks each symbol for new resolved outcomes.<br>
-            As soon as <strong style="color:#fbbf24">3 new outcomes</strong> arrive since the last training run,
-            the model retrains immediately — no waiting.<br>
-            As a fallback, it retrains every <strong style="color:#38bdf8">2 hours</strong> even without new outcomes.<br>
-            <strong style="color:#fbbf24">Confirmed outcomes</strong> are injected back at
-            <strong style="color:#a78bfa">3× weight</strong> so the model learns from its real mistakes.<br>
-            <strong style="color:#38bdf8">Gradient Boosting</strong> runs two classifiers — one for BUY, one for SELL —
-            each outputting a probability from 0 to 1.<br>
-            A signal fires when confidence exceeds <strong style="color:#fbbf24">65%</strong>.
-            STRONG signals require both the rule engine and AI to agree.
-          </p>
+          <h6 class="mb-2" style="font-size:.85rem">How Training Works</h6>
+          <div style="color:#8b8fa8; font-size:.8rem; line-height:1.6">
+            <span style="color:#4ade80">Every 10 min</span> — checks each symbol for new outcomes.
+            <span style="color:#fbbf24">3 new outcomes</span> triggers immediate retrain.
+            Fallback: retrain every <span style="color:#38bdf8">2 hours</span>.<br>
+            Confirmed outcomes injected at <span style="color:#a78bfa">3× weight</span> to prioritize real feedback.
+            Two <span style="color:#38bdf8">GradientBoosting</span> classifiers (BUY + SELL), each 0–1 probability.
+            Signal fires above <span style="color:#fbbf24">65%</span> threshold.
+            STRONG = rule engine + AI both agree.
+          </div>
         </div>
       </div>
       <div class="col-md-6">
         <div class="card p-3 h-100">
-          <h6 class="mb-3">Confidence Notes</h6>
-          <div style="color:#8b8fa8;font-size:.84rem;line-height:1.7">
-            AI confidence is a model probability, not a guarantee. If it looks low, the better fix is more resolved symbol-specific outcomes and better calibration, not artificially inflating the number.
-            <div class="mt-2" id="ml-confidence-note">Confidence details will appear once data is available.</div>
+          <h6 class="mb-2" style="font-size:.85rem">Confidence Notes</h6>
+          <div style="color:#8b8fa8;font-size:.8rem;line-height:1.6">
+            AI confidence is a model probability, not a guarantee. Low confidence usually means limited resolved outcomes, not a broken model — it improves as outcomes accumulate.
+            <div class="mt-2" id="ml-confidence-note"></div>
           </div>
         </div>
       </div>
@@ -281,10 +294,10 @@ _HTML = """<!DOCTYPE html>
   <!-- ── LEARNING ACTIVITY TAB ───────────────────────────────────────── -->
   <div class="tab-pane fade" id="tab-activity">
 
-    <div class="row g-3 mb-4">
+    <div class="row g-2 mb-3">
       <div class="col-md-5">
         <div class="card p-3 h-100">
-          <h6 class="mb-3">🎛 Action Center</h6>
+          <h6 class="mb-2" style="font-size:.85rem">🎛 Action Center</h6>
           <div class="row g-2">
             <div class="col-md-6"><button class="btn action-btn" onclick="runAction('scan_now')">Scan Market Now</button></div>
             <div class="col-md-6"><button class="btn action-btn" onclick="runAction('check_outcomes_now')">Check Outcomes Now</button></div>
@@ -302,18 +315,18 @@ _HTML = """<!DOCTYPE html>
       </div>
       <div class="col-md-7">
         <div class="card p-3 h-100">
-          <h6 class="mb-3">🛰 Operator Snapshot</h6>
-          <div id="ops-snapshot" style="font-size:.84rem;color:#8b8fa8;line-height:1.7"></div>
+          <h6 class="mb-2" style="font-size:.85rem">🛰 Operator Snapshot</h6>
+          <div id="ops-snapshot" style="font-size:.82rem;color:#8b8fa8;line-height:1.6"></div>
         </div>
       </div>
     </div>
 
     <!-- Live bootstrap job progress -->
-    <div class="row g-3 mb-4" id="job-progress-row" style="display:none">
+    <div class="row g-2 mb-3" id="job-progress-row" style="display:none">
       <div class="col-12">
         <div class="card p-3" style="border-color:#a78bfa40;background:#1a1a2e">
           <div class="d-flex justify-content-between align-items-center mb-2">
-            <h6 class="mb-0" style="color:#a78bfa">⚙️ Training Job In Progress</h6>
+            <h6 class="mb-0" style="color:#a78bfa;font-size:.85rem">⚙️ Training Job In Progress</h6>
             <span id="job-status-badge" class="badge" style="background:#a78bfa22;color:#a78bfa">running</span>
           </div>
           <div id="job-progress-bar-wrap" class="mb-2">
@@ -330,11 +343,11 @@ _HTML = """<!DOCTYPE html>
     </div>
 
     <!-- Recent training jobs -->
-    <div class="row g-3 mb-4">
+    <div class="row g-2 mb-3">
       <div class="col-12">
         <div class="card p-3">
-          <div class="d-flex justify-content-between align-items-center mb-3">
-            <h6 class="mb-0">📦 Bootstrap & Training Job History</h6>
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <h6 class="mb-0" style="font-size:.85rem">📦 Bootstrap & Training Job History</h6>
             <button class="btn btn-sm" style="background:#1a2d3a;color:#38bdf8;border:1px solid #2a2d3a" onclick="refreshJobs()">↻ Refresh</button>
           </div>
           <div id="job-history"></div>
@@ -343,11 +356,11 @@ _HTML = """<!DOCTYPE html>
     </div>
 
     <!-- Model health cards per symbol -->
-    <div class="row g-3 mb-4">
+    <div class="row g-2 mb-3">
       <div class="col-12">
         <div class="card p-3">
-          <div class="d-flex justify-content-between align-items-center mb-3">
-            <h6 class="mb-0">🩺 Model Health per Symbol</h6>
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <h6 class="mb-0" style="font-size:.85rem">🩺 Model Health per Symbol</h6>
             <div class="d-flex gap-2 align-items-center">
               <select id="activity-symbol" class="form-control" style="max-width:150px" onchange="refreshActivity()">
                 <option value="">All symbols</option>
@@ -367,59 +380,55 @@ _HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <div class="row g-3 mb-4">
+    <div class="row g-2 mb-3">
       <div class="col-md-6">
         <div class="card p-3">
-          <h6 class="mb-3">🧭 Outcome Resolution Reasons</h6>
-          <canvas id="chart-resolution-reasons" height="200"></canvas>
+          <h6 class="mb-2" style="font-size:.85rem">🧭 Outcome Resolution</h6>
+          <canvas id="chart-resolution-reasons" height="140"></canvas>
         </div>
       </div>
       <div class="col-md-6">
         <div class="card p-3">
-          <h6 class="mb-3">⏱ Average Time to Outcome</h6>
-          <canvas id="chart-resolution-time" height="200"></canvas>
+          <h6 class="mb-2" style="font-size:.85rem">⏱ Avg Time to Outcome</h6>
+          <canvas id="chart-resolution-time" height="140"></canvas>
         </div>
       </div>
     </div>
 
-    <div class="row g-3 mb-4">
+    <div class="row g-2 mb-3">
       <div class="col-md-6">
         <div class="card p-3">
-          <h6 class="mb-3">📏 MFE vs MAE by Symbol</h6>
-          <canvas id="chart-mfe-mae" height="200"></canvas>
+          <h6 class="mb-2" style="font-size:.85rem">📏 MFE vs MAE by Symbol</h6>
+          <canvas id="chart-mfe-mae" height="140"></canvas>
         </div>
       </div>
       <div class="col-md-6">
         <div class="card p-3 h-100">
-          <h6 class="mb-3">🧠 Adaptive TP/SL Tuning</h6>
-          <div id="adaptive-summary" style="font-size:.84rem;color:#8b8fa8;line-height:1.7"></div>
+          <h6 class="mb-2" style="font-size:.85rem">🧠 Adaptive TP/SL Tuning</h6>
+          <div id="adaptive-summary" style="font-size:.82rem;color:#8b8fa8;line-height:1.6"></div>
         </div>
       </div>
     </div>
 
-    <div class="row g-3 mb-4">
-      <!-- Training event log -->
+    <div class="row g-2 mb-3">
       <div class="col-md-6">
         <div class="card p-3 h-100">
-          <h6 class="mb-3">📋 Learning Cycle Log</h6>
-          <div id="train-log" style="max-height:420px;overflow-y:auto"></div>
+          <h6 class="mb-2" style="font-size:.85rem">📋 Learning Cycle Log</h6>
+          <div id="train-log" style="max-height:380px;overflow-y:auto"></div>
         </div>
       </div>
-
-      <!-- Recent outcome feed -->
       <div class="col-md-6">
         <div class="card p-3 h-100">
-          <h6 class="mb-3">📬 Recent Resolved Outcomes</h6>
-          <div id="outcome-feed" style="max-height:420px;overflow-y:auto"></div>
+          <h6 class="mb-2" style="font-size:.85rem">📬 Recent Outcomes</h6>
+          <div id="outcome-feed" style="max-height:380px;overflow-y:auto"></div>
         </div>
       </div>
     </div>
 
-    <!-- Improvement suggestions -->
-    <div class="row g-3 mb-4">
+    <div class="row g-2 mb-3">
       <div class="col-12">
         <div class="card p-3">
-          <h6 class="mb-3">💡 What Needs Attention</h6>
+          <h6 class="mb-2" style="font-size:.85rem">💡 What Needs Attention</h6>
           <div id="suggestions"></div>
         </div>
       </div>
@@ -429,14 +438,14 @@ _HTML = """<!DOCTYPE html>
   <!-- ── ADMIN TAB ─────────────────────────────────────────────────────── -->
   <div class="tab-pane fade" id="tab-admin">
 
-    <div class="row g-3 mb-4">
+    <div class="row g-2 mb-3">
       <div class="col-12">
         <div class="card p-3" style="border-color:#a78bfa40">
-          <h6 class="mb-3">🚀 ML Bootstrap — Pre-train from 2 Years of Historical Data</h6>
-          <p class="small mb-3" style="color:#8b8fa8">
+          <h6 class="mb-2" style="font-size:.85rem">🚀 ML Bootstrap — Pre-train from 2 Years of Historical Data</h6>
+          <p class="small mb-2" style="color:#8b8fa8;font-size:.8rem">
             Runs the signal engine on 2 years of hourly bars per symbol, labels each signal
             as correct/incorrect from TP/SL outcomes, and trains the ML models.
-            Takes ~5–10 minutes. Progress is visible in the 🔄 Learning Activity tab.
+            Takes ~5–10 minutes. Progress is visible in the 🔄 Learning tab.
           </p>
           <div class="d-flex gap-3 align-items-center flex-wrap">
             <button class="btn" style="background:#2a1a4a;color:#a78bfa;border:1px solid #a78bfa40;padding:8px 24px;font-size:.9rem"
@@ -448,11 +457,11 @@ _HTML = """<!DOCTYPE html>
     </div>
 
     <!-- AI Sentiment Settings -->
-    <div class="row g-3 mb-4">
+    <div class="row g-2 mb-3">
       <div class="col-12">
         <div class="card p-3" style="border-color:#38bdf840">
-          <h6 class="mb-3">🧠 AI Sentiment Settings</h6>
-          <p class="small mb-3" style="color:#8b8fa8">
+          <h6 class="mb-2" style="font-size:.85rem">🧠 AI Sentiment Settings</h6>
+          <p class="small mb-2" style="color:#8b8fa8;font-size:.8rem">
             Switch provider without restarting the bot — changes take effect on the next scan.
           </p>
           <div class="row g-3" id="settings-form">
@@ -545,12 +554,12 @@ _HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <div class="row g-3 mb-4">
+    <div class="row g-2 mb-3">
       <div class="col-md-6">
         <div class="card p-3">
-          <h6 class="mb-3">⚙️ Watched Symbols</h6>
-          <p class="small mb-3" style="color:#8b8fa8">
-            Changes take effect within 5 minutes — the bot refreshes this list automatically.
+          <h6 class="mb-2" style="font-size:.85rem">⚙️ Watched Symbols</h6>
+          <p class="small mb-2" style="color:#8b8fa8;font-size:.8rem">
+            Changes take effect within 5 minutes.
           </p>
 
           <!-- Search input with autocomplete -->
@@ -575,7 +584,7 @@ _HTML = """<!DOCTYPE html>
 
       <div class="col-md-6">
         <div class="card p-3">
-          <h6 class="mb-3">📊 Symbol Signal Stats</h6>
+          <h6 class="mb-2" style="font-size:.85rem">📊 Symbol Signal Stats</h6>
           <div id="symbol-stats"></div>
         </div>
       </div>
@@ -682,6 +691,15 @@ function formatTime(iso) {
   if (!iso) return '—';
   return new Date(iso+'Z').toLocaleString();
 }
+function formatShortTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso+'Z');
+  const now = new Date();
+  const diffDays = (now - d) / 86400000;
+  if (diffDays < 1) return d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  if (diffDays < 7) return d.toLocaleDateString([], {weekday:'short'}) + ' ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  return d.toLocaleDateString([], {month:'short', day:'numeric'}) + ' ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+}
 function accColor(acc) {
   if (acc === null || acc === undefined) return '#8b8fa8';
   if (acc >= 60) return '#4ade80';
@@ -698,6 +716,42 @@ function accBar(acc, total) {
     <span style="color:${accColor(acc)};min-width:42px;text-align:right">${acc}%</span>
     <span style="color:#555;font-size:.75rem">(${total})</span>
   </div>`;
+}
+
+// ── Market status bar ─────────────────────────────────────────────────────────
+function updateMarketStatus() {
+  const now = new Date();
+  // CET/CEST offset detection
+  const cetOffset = new Date(now.toLocaleString('en-US', {timeZone:'Europe/Berlin'})) - now;
+  const cetHour = new Date(now.getTime() + cetOffset);
+  const cetH = cetHour.getHours() + cetHour.getMinutes() / 60;
+  const cetStr = cetHour.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  const isTZ = cetHour.getTimezoneOffset() === 0;
+
+  // ET offset
+  const etOffset = new Date(now.toLocaleString('en-US', {timeZone:'America/New_York'})) - now;
+  const etHour = new Date(now.getTime() + etOffset);
+  const etH = etHour.getHours() + etHour.getMinutes() / 60;
+  const etStr = etHour.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+
+  const dow = now.getDay(); // 0=Sun, 6=Sat
+
+  // XETRA: Mon-Fri 09:00-17:30 CET
+  const xetraOpen = dow >= 1 && dow <= 5 && cetH >= 9 && cetH < 17.5;
+  // US: Mon-Fri 09:30-16:00 ET
+  const usOpen = dow >= 1 && dow <= 5 && etH >= 9.5 && etH < 16;
+  // Crypto: always open
+
+  function mkDot(open, label, hours) {
+    const color = open ? '#4ade80' : '#f87171';
+    const status = open ? 'Open' : 'Closed';
+    return `<span><span class="status-dot" style="background:${color}"></span><span style="color:#e0e0e0">${label}</span> <span style="color:#555">${status} · ${hours}</span></span>`;
+  }
+
+  document.getElementById('market-us').innerHTML    = mkDot(usOpen,    '🇺🇸 US',     '15:30–22:00 CET');
+  document.getElementById('market-xetra').innerHTML = mkDot(xetraOpen, '🇩🇪 XETRA', '09:00–17:30 CET');
+  document.getElementById('market-crypto').innerHTML= mkDot(true,      '₿ Crypto',  '24/7');
+  document.getElementById('market-times').textContent = `CET ${cetStr}  ·  ET ${etStr}`;
 }
 
 // ── Overview ──────────────────────────────────────────────────────────────────
@@ -752,15 +806,14 @@ async function refreshOverview() {
     }).join('') || '<tr><td colspan="3" class="text-center" style="color:#555">No closed trades yet</td></tr>';
 
   document.getElementById('signals-body').innerHTML = signals.map(s=>`<tr>
-    <td>${formatTime(s.sent_at)}</td>
-    <td><strong>${s.symbol}</strong></td>
+    <td style="white-space:nowrap;color:#555">${formatShortTime(s.sent_at)}</td>
+    <td><span class="sym-tag">${s.symbol}</span></td>
     <td>${badge(s.action,'badge-'+s.action)}</td>
     <td>${badge(s.strength||'RULE','badge-'+(s.strength||'RULE'))}</td>
-    <td>$${s.price?s.price.toFixed(2):'—'}</td>
+    <td style="white-space:nowrap">$${s.price?s.price.toFixed(2):'—'}</td>
     <td>${s.rsi?s.rsi.toFixed(1):'—'}</td>
     <td>${s.ai_confidence?(s.ai_confidence*100).toFixed(0)+'%':'—'}</td>
     <td>${outcomeBadge(s.outcome)}</td>
-    <td>${s.outcome_price?'$'+s.outcome_price.toFixed(2):'—'}</td>
   </tr>`).join('');
 }
 
@@ -804,31 +857,43 @@ async function refreshML() {
     bucketsChart.update();
   }
 
-  // Per-symbol table
+  // Per-symbol table (6 columns)
   const rows = Object.entries(ml.per_symbol).map(([sym, d]) => {
     const tr = d.training;
-    const trainedAt = tr ? new Date(tr.trained_at+'Z').toLocaleString() : '—';
-    const samples   = tr ? tr.train_samples : '—';
+    const trainedAt = tr ? new Date(tr.trained_at+'Z').toLocaleString() : null;
+    const samples   = tr ? tr.train_samples : null;
     const bwr = d.bootstrap_win_rate != null
-      ? `<span style="color:${d.bootstrap_win_rate>=54?'#4ade80':d.bootstrap_win_rate>=50?'#fbbf24':'#f87171'}">${d.bootstrap_win_rate}%</span>
-         <span style="color:#555;font-size:.72rem"> (${d.bootstrap_correct||0}✓ ${d.bootstrap_incorrect||0}✗)</span>`
+      ? `<span style="color:${d.bootstrap_win_rate>=54?'#4ade80':d.bootstrap_win_rate>=50?'#fbbf24':'#f87171'};font-weight:600">${d.bootstrap_win_rate}%</span>
+         <div style="color:#555;font-size:.70rem">${d.bootstrap_correct||0}✓ ${d.bootstrap_incorrect||0}✗ · ${d.bootstrap_samples||0} samples</div>`
+      : '<span style="color:#555">—</span>';
+    const mkCell = (total, acc, minN) => {
+      if (!total) return '<span style="color:#555">—</span>';
+      if (total < minN) {
+        const pct = Math.round(total / minN * 100);
+        return `<div style="color:#8b8fa8;font-size:.72rem;margin-bottom:2px">${total} signal${total!==1?'s':''}</div>
+                <div class="d-flex align-items-center gap-1">
+                  <div class="progress flex-grow-1" style="height:4px"><div class="progress-bar" style="width:${pct}%;background:#555"></div></div>
+                  <span style="color:#555;font-size:.70rem">${total}/${minN}</span>
+                </div>`;
+      }
+      return `<div style="color:#8b8fa8;font-size:.72rem;margin-bottom:2px">${total} signal${total!==1?'s':''}</div>
+              ${accBar(acc, total)}`;
+    };
+    const trainCell = trainedAt
+      ? `<div style="font-size:.74rem;color:#8b8fa8">${trainedAt}</div>
+         <div style="font-size:.70rem;color:#555">${samples} samples · ${d.train_runs||0} run${d.train_runs!==1?'s':''}</div>`
       : '<span style="color:#555">—</span>';
     return `<tr>
       <td><span class="sym-tag">${sym}</span></td>
       <td>${bwr}</td>
-      <td>${d.ai_total||0}</td>
-      <td>${d.ai_total >= 5 ? accBar(d.ai_accuracy, d.ai_total) : '<span style="color:#555">need 5+ signals</span>'}</td>
-      <td>${d.strong_total||0}</td>
-      <td>${d.strong_total >= 3 ? accBar(d.strong_accuracy, d.strong_total) : '<span style="color:#555">need 3+ signals</span>'}</td>
-      <td>${d.rule_total||0}</td>
-      <td>${d.rule_total >= 3 ? accBar(d.rule_accuracy, d.rule_total) : '<span style="color:#555">need 3+ signals</span>'}</td>
-      <td style="font-size:.75rem;color:#8b8fa8">${trainedAt}</td>
-      <td>${samples}</td>
-      <td>${d.train_runs||0}</td>
+      <td>${mkCell(d.ai_total, d.ai_accuracy, 5)}</td>
+      <td>${mkCell(d.strong_total, d.strong_accuracy, 3)}</td>
+      <td>${mkCell(d.rule_total, d.rule_accuracy, 3)}</td>
+      <td>${trainCell}</td>
     </tr>`;
   }).join('');
   document.getElementById('ml-body').innerHTML = rows ||
-    '<tr><td colspan="11" class="text-center" style="color:#555">No resolved signals yet</td></tr>';
+    '<tr><td colspan="6" class="text-center" style="color:#555">No resolved signals yet</td></tr>';
 
   // Strength breakdown (from stats)
   const stats = await fetch('/api/stats').then(r=>r.json());
@@ -951,16 +1016,26 @@ async function refreshAdmin() {
   ]);
 
   const list = document.getElementById('symbol-list');
+  const marketLabels = {us:'🇺🇸 US', xetra:'🇩🇪 XETRA', crypto:'₿ Crypto'};
   list.innerHTML = syms.map(s => {
     const statusBadge = s.active
       ? '<span class="badge badge-active ms-2">Active</span>'
       : '<span class="badge badge-inactive ms-2">Inactive</span>';
     const delBtn = s.active
-      ? `<button class="btn btn-del ms-auto" onclick="removeSymbol('${s.symbol}')">Remove</button>`
-      : `<button class="btn btn-add ms-auto" onclick="restoreSymbol('${s.symbol}')" style="font-size:.75rem;padding:2px 8px">Restore</button>`;
-    return `<div class="d-flex align-items-center mb-2 p-2" style="background:#0f1117;border-radius:6px">
+      ? `<button class="btn btn-del" onclick="removeSymbol('${s.symbol}')">✕</button>`
+      : `<button class="btn btn-add ms-1" onclick="restoreSymbol('${s.symbol}')" style="font-size:.72rem;padding:2px 8px">Restore</button>`;
+    const mkt = s.market || 'auto';
+    const marketSel = `<select class="form-control ms-2" style="max-width:130px;font-size:.75rem;padding:2px 6px"
+        onchange="setSymbolMarket('${s.symbol}', this.value)">
+        <option value="" ${mkt==='auto'?'selected':''}>🔍 Auto-detect</option>
+        <option value="us" ${mkt==='us'?'selected':''}>🇺🇸 US (NYSE/NASDAQ)</option>
+        <option value="xetra" ${mkt==='xetra'?'selected':''}>🇩🇪 XETRA</option>
+        <option value="crypto" ${mkt==='crypto'?'selected':''}>₿ Crypto 24/7</option>
+      </select>`;
+    return `<div class="d-flex align-items-center mb-2 p-2 gap-1" style="background:#0f1117;border-radius:6px;flex-wrap:wrap">
       <span class="sym-tag">${s.symbol}</span>${statusBadge}
-      <span class="ms-3 text-muted" style="font-size:.72rem">${s.added_by} · ${s.added_at.slice(0,10)}</span>
+      ${marketSel}
+      <span class="ms-auto text-muted" style="font-size:.70rem">${s.added_at.slice(0,10)}</span>
       ${delBtn}
     </div>`;
   }).join('') || '<div style="color:#555">No symbols configured yet.</div>';
@@ -1044,6 +1119,13 @@ async function restoreSymbol(sym) {
   if (res.ok) refreshAdmin();
 }
 
+async function setSymbolMarket(sym, market) {
+  await fetch(`/api/symbols/${sym}/market`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({market: market || null}),
+  });
+}
+
 // ── Learning Activity ─────────────────────────────────────────────────────────
 function trendIcon(t) {
   if (t === 'improving') return '<span class="trend-up">↑ Improving</span>';
@@ -1090,23 +1172,22 @@ async function refreshActivity() {
       const accLabel = hasData
         ? `<strong style="color:${accColor}">${h.recent_acc}%</strong> <span style="color:#555">(${h.recent_count})</span>`
         : `<span style="color:#555">no live data yet</span>`;
-      return `<div class="col-6 col-md-4 col-lg-3">
+      return `<div class="col-6 col-md-4 col-lg-3 col-xl-2">
         <div class="health-card">
-          <div class="d-flex justify-content-between align-items-center mb-2">
+          <div class="d-flex justify-content-between align-items-center mb-1">
             <span class="sym-tag">${sym}</span>
             ${trendIcon(h.trend)}
           </div>
-          <div class="progress mb-1" style="height:5px">
+          <div class="progress mb-1" style="height:4px">
             <div class="progress-bar ${barCls}" style="width:${barW}%"></div>
           </div>
-          <div class="d-flex justify-content-between" style="font-size:.75rem;color:#8b8fa8">
-            <span>Live acc: ${accLabel}</span>
-            ${hasData ? `<span>All: ${h.all_acc}%</span>` : ''}
+          <div style="font-size:.74rem;color:#8b8fa8">
+            Live: ${accLabel}
+            ${hasData ? `<span style="color:#555"> · All: ${h.all_acc}%</span>` : ''}
           </div>
-          <div class="mt-2" style="font-size:.72rem;color:#555">
-            <span>📊 ${h.total_outcomes} outcomes · ⏳ ${h.pending} pending</span><br>
-            <span>🕒 Trained ${modelAge(h.last_trained)} · Checked ${modelAge(h.last_checked)}</span><br>
-            ${hasData ? `<span>✅ ${h.recent_successes} success · ❌ ${h.recent_failures} failure</span>` : '<span>Accumulating live signals…</span>'}
+          <div class="mt-1" style="font-size:.70rem;color:#555">
+            ${h.total_outcomes} outcomes · ${h.pending} pending<br>
+            ${modelAge(h.last_trained)} · ${hasData ? `${h.recent_successes}✓ ${h.recent_failures}✗` : 'accumulating…'}
           </div>
         </div>
       </div>`;
@@ -1412,8 +1493,10 @@ async function refreshJobs() {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 refreshOverview();
+updateMarketStatus();
 setInterval(refreshOverview, 30000);
 setInterval(refreshOps, 30000);
+setInterval(updateMarketStatus, 60000);
 
 document.querySelectorAll('[data-bs-target="#tab-ml"]').forEach(el =>
   el.addEventListener('shown.bs.tab', () => refreshML())
@@ -1566,6 +1649,16 @@ def api_symbols_remove(symbol):
     if removed:
         return jsonify({"ok": True})
     return jsonify({"ok": False, "error": "Symbol not found or already inactive"}), 404
+
+
+@app.route("/api/symbols/<symbol>/market", methods=["POST"])
+def api_symbols_set_market(symbol):
+    data = request.get_json(force=True)
+    market = (data.get("market") or "").strip().lower() or None
+    if market and market not in ("us", "xetra", "crypto"):
+        return jsonify({"ok": False, "error": "market must be us, xetra, or crypto"}), 400
+    set_symbol_market(symbol.upper(), market)
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":

@@ -89,7 +89,8 @@ LEARNING_CHECK_INTERVAL = int(os.getenv("LEARNING_CHECK_INTERVAL_MINUTES", "10")
 ACTION_QUEUE_INTERVAL = int(os.getenv("ACTION_QUEUE_INTERVAL_SECONDS", "60"))
 ENABLE_SUBSCRIBER_DM_SIGNALS = os.getenv("ENABLE_SUBSCRIBER_DM_SIGNALS", "false").lower() == "true"
 
-ET = ZoneInfo("America/New_York")
+ET  = ZoneInfo("America/New_York")
+CET = ZoneInfo("Europe/Berlin")
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -703,9 +704,10 @@ async def _broadcast_signal(bot, sig: dict, session: str = "open") -> None:
     ch_lang = admin_pref.get("lang", "en")
     ch_mode = admin_pref.get("mode", "beginner")
     body = signal_msg(sig, lang=ch_lang, mode=ch_mode)
-    et_time = datetime.now(ET).strftime("%H:%M ET")
+    cet_time = datetime.now(CET).strftime("%H:%M")
+    tz_label = "CEST" if datetime.now(CET).dst() else "CET"
     session_label = "  ·  🌅 پیش‌بازار" if (session == "pre" and ch_lang == "fa") else ("  ·  🌅 Pre-market" if session == "pre" else "")
-    body += f"\n━━━━━━━━━━━━━━━━━━━\n⏱ `{et_time}`{session_label}  ·  #{sig['symbol']}"
+    body += f"\n━━━━━━━━━━━━━━━━━━━\n⏱ `{cet_time} {tz_label}`{session_label}  ·  #{sig['symbol']}"
     if sig["action"] == "BUY" and BOT_USERNAME:
         deep_link = (
             f"https://t.me/{BOT_USERNAME}?start="
