@@ -1285,6 +1285,8 @@ _SETTING_DEFAULTS = {
     "finnhub_api_key": "",
     "news_lookback_hours": "6",
     "outcome_notify_admin": "false",           # true / false
+    "display_currency": "USD",                 # USD / EUR / GBP / CHF
+    "default_market": "us",                    # us / xetra
 }
 
 
@@ -1364,6 +1366,32 @@ def get_all_sentiment_cache() -> list[dict]:
             FROM sentiment_cache ORDER BY symbol
         """).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_accuracy_by_direction() -> dict:
+    """Per-symbol, per-direction (BUY/SELL) accuracy for resolved signals."""
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT symbol, action,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN outcome='correct'   THEN 1 ELSE 0 END) AS correct,
+                   SUM(CASE WHEN outcome='incorrect' THEN 1 ELSE 0 END) AS incorrect
+            FROM signals
+            WHERE outcome IN ('correct', 'incorrect')
+              AND symbol IN (SELECT symbol FROM symbols WHERE active=1)
+            GROUP BY symbol, action
+        """).fetchall()
+    result: dict[str, dict] = {}
+    for r in rows:
+        sym = r["symbol"]
+        decisive = r["correct"] + r["incorrect"]
+        result.setdefault(sym, {})[r["action"]] = {
+            "total": r["total"],
+            "correct": r["correct"],
+            "incorrect": r["incorrect"],
+            "accuracy": round(r["correct"] / decisive * 100, 1) if decisive > 0 else None,
+        }
+    return result
 
 
 def get_recent_signals(limit: int = 50) -> list[dict]:

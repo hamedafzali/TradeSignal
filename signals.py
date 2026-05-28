@@ -340,8 +340,11 @@ def signal_from_df(symbol: str, df: pd.DataFrame,
     ema_bull = float(ema9.iloc[-1]) > float(ema21.iloc[-1])
     ema_bear = float(ema9.iloc[-1]) < float(ema21.iloc[-1])
 
-    buy_hits = [rsi_now < 40, macd_bull, ema_bull]
-    sell_hits = [rsi_now > 60, macd_bear, ema_bear]
+    # RSI thresholds: 35/65 (tighter than classic 40/60) — reduces noise on 5m candles
+    rsi_oversold  = rsi_now < 35
+    rsi_overbought = rsi_now > 65
+    buy_hits  = [rsi_oversold,  macd_bull, ema_bull]
+    sell_hits = [rsi_overbought, macd_bear, ema_bear]
     trend = _trend(df_1h) if df_1h is not None and not df_1h.empty else "unknown"
 
     sl_mult, tp_mult, adaptive_note = _adaptive_tp_sl(price, atr_val, symbol)
@@ -350,7 +353,7 @@ def signal_from_df(symbol: str, df: pd.DataFrame,
     rr = round(tp_dist / sl_dist, 1) if sl_dist > 0 else 0
 
     reasons_buy = []
-    if rsi_now < 40:
+    if rsi_oversold:
         reasons_buy.append(f"RSI oversold ({rsi_now:.1f})")
     if macd_bull:
         reasons_buy.append("MACD above signal (bullish)")
@@ -362,7 +365,7 @@ def signal_from_df(symbol: str, df: pd.DataFrame,
         reasons_buy.append(adaptive_note)
 
     reasons_sell = []
-    if rsi_now > 60:
+    if rsi_overbought:
         reasons_sell.append(f"RSI overbought ({rsi_now:.1f})")
     if macd_bear:
         reasons_sell.append("MACD below signal (bearish)")
@@ -389,9 +392,10 @@ def signal_from_df(symbol: str, df: pd.DataFrame,
             "sl_mult": round(sl_mult, 2), "tp_mult": round(tp_mult, 2),
         }
 
-    if sum(buy_hits) >= 2 and has_vol:
+    # RSI is mandatory — prevents pure trend-chasing signals (MACD+EMA agree but RSI neutral)
+    if rsi_oversold and sum(buy_hits) >= 2 and has_vol:
         return _make("BUY", reasons_buy)
-    if sum(sell_hits) >= 2 and has_vol:
+    if rsi_overbought and sum(sell_hits) >= 2 and has_vol:
         return _make("SELL", reasons_sell)
     return None
 

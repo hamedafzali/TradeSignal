@@ -10,7 +10,7 @@ from database import (
     create_action_request, get_ops_snapshot,
     get_running_training_job, get_recent_training_jobs,
     get_all_settings, set_setting, get_all_sentiment_cache,
-    set_symbol_market,
+    set_symbol_market, get_accuracy_by_direction,
 )
 
 app = Flask(__name__)
@@ -334,6 +334,29 @@ _HTML = """<!DOCTYPE html>
                 <th title="Last training run details">Training</th>
               </tr></thead>
               <tbody id="ml-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Direction accuracy diagnostic -->
+    <div class="row g-2 mb-2">
+      <div class="col-12">
+        <div class="card p-3">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <div class="section-head mb-0">🧭 Direction Accuracy — BUY vs SELL</div>
+            <span style="color:var(--muted);font-size:.72rem">Identifies directional bias. Needs ≥3 resolved signals per direction to be meaningful.</span>
+          </div>
+          <div class="table-responsive">
+            <table class="table table-hover mb-0" id="direction-table">
+              <thead><tr>
+                <th>Symbol</th>
+                <th>BUY accuracy</th>
+                <th>SELL accuracy</th>
+                <th>Diagnosis</th>
+              </tr></thead>
+              <tbody id="direction-body"></tbody>
             </table>
           </div>
         </div>
@@ -985,6 +1008,55 @@ async function refreshML() {
     if (totalResolved < 50) noteEl.textContent = `${totalResolved} resolved signals — accuracy stabilises above ~50 per symbol`;
     else noteEl.textContent = '';
   }
+
+  // Direction accuracy breakdown
+  const dirData = await fetch('/api/accuracy-direction').then(r=>r.json());
+  const dirRows = Object.entries(dirData).sort(([a],[b]) => a.localeCompare(b)).map(([sym, dirs]) => {
+    function dirCell(d) {
+      if (!d) return '<span class="text-muted">—</span>';
+      if (d.correct + d.incorrect < 3) {
+        return `<span class="text-muted">${d.total} sig (too few)</span>`;
+      }
+      const acc = d.accuracy;
+      const color = acc >= 55 ? 'var(--green)' : acc >= 45 ? 'var(--yellow)' : 'var(--red)';
+      return `<span style="color:${color};font-weight:600">${acc}%</span> <span class="text-muted">(${d.correct}/${d.correct+d.incorrect})</span>`;
+    }
+    const buy = dirs['BUY'], sell = dirs['SELL'];
+    let diagnosis = '';
+    const buyAcc = buy && (buy.correct + buy.incorrect) >= 3 ? buy.accuracy : null;
+    const sellAcc = sell && (sell.correct + sell.incorrect) >= 3 ? sell.accuracy : null;
+    if (buyAcc === null && sellAcc === null) {
+      diagnosis = '<span class="text-muted">accumulating data</span>';
+    } else if (buyAcc !== null && sellAcc !== null) {
+      if (buyAcc < 40 && sellAcc < 40) {
+        diagnosis = '<span style="color:var(--red)">⚠️ both directions unreliable</span>';
+      } else if (buyAcc >= 50 && sellAcc < 40) {
+        diagnosis = '<span style="color:var(--yellow)">BUY works · SELL drags accuracy</span>';
+      } else if (sellAcc >= 50 && buyAcc < 40) {
+        diagnosis = '<span style="color:var(--yellow)">SELL works · BUY drags accuracy</span>';
+      } else if (buyAcc >= 50 && sellAcc >= 50) {
+        diagnosis = '<span style="color:var(--green)">✓ both directions profitable</span>';
+      } else {
+        diagnosis = '<span class="text-muted">marginal</span>';
+      }
+    } else if (buyAcc !== null) {
+      diagnosis = buyAcc >= 50
+        ? '<span style="color:var(--green)">BUY profitable</span>'
+        : '<span style="color:var(--red)">BUY underperforming</span>';
+    } else {
+      diagnosis = sellAcc >= 50
+        ? '<span style="color:var(--green)">SELL profitable</span>'
+        : '<span style="color:var(--red)">SELL underperforming</span>';
+    }
+    return `<tr>
+      <td><span class="sym-tag">${sym}</span></td>
+      <td>${dirCell(buy)}</td>
+      <td>${dirCell(sell)}</td>
+      <td style="font-size:.76rem">${diagnosis}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('direction-body').innerHTML = dirRows ||
+    '<tr><td colspan="4" class="text-center text-muted">No resolved signals yet</td></tr>';
 
   // Strength breakdown (from stats)
   const stats = await fetch('/api/stats').then(r=>r.json());
@@ -1743,8 +1815,8 @@ def api_settings_post():
     allowed_keys = {
         "sentiment_provider", "sentiment_local_url", "claude_api_key", "gemini_api_key",
         "sentiment_suppress_threshold", "news_provider", "finnhub_api_key",
-        "outcome_notify_admin",
-        "news_lookback_hours",
+        "outcome_notify_admin", "news_lookback_hours",
+        "display_currency", "default_market",
     }
     for key, value in data.items():
         if key in allowed_keys:
@@ -1797,6 +1869,11 @@ def api_fx_rate():
     except Exception:
         pass
     return jsonify({"currency": currency, "symbol": symbol, "rate": 1.0})
+
+
+@app.route("/api/accuracy-direction")
+def api_accuracy_direction():
+    return jsonify(get_accuracy_by_direction())
 
 
 @app.route("/api/symbols/<symbol>/market", methods=["POST"])
