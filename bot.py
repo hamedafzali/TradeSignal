@@ -76,6 +76,27 @@ from signals import (
 
 load_dotenv()
 
+# ── Training notification helper ──────────────────────────────────────────────
+def _train_summary_line(symbol: str, outcome_samples: int, trigger: str) -> str:
+    """One-line summary for a trained symbol with live accuracy."""
+    trigger_icon = {"outcomes": "⚡", "time": "⏱", "manual": "🖱", "bootstrap": "🚀"}.get(trigger, "🔄")
+    try:
+        from database import get_ml_accuracy_stats
+        d = get_ml_accuracy_stats()["per_symbol"].get(symbol, {})
+        ai_total = d.get("ai_total", 0)
+        ai_acc   = d.get("ai_accuracy")
+        if ai_total >= 3 and ai_acc is not None:
+            acc_str = f" · AI {ai_acc}% ({ai_total} sig)"
+        elif ai_total > 0:
+            acc_str = f" · {ai_total} sig (accumulating)"
+        else:
+            acc_str = " · no live outcomes yet"
+        blend = f"{outcome_samples} blended" if outcome_samples else "synthetic only"
+        return f"`{symbol}` {trigger_icon} {blend}{acc_str}"
+    except Exception:
+        return f"`{symbol}` {trigger_icon} {outcome_samples} outcomes blended"
+
+
 # ── Currency helpers ───────────────────────────────────────────────────────────
 _CURRENCY_SYMBOLS = {"USD": "$", "EUR": "€", "GBP": "£", "CHF": "Fr"}
 _fx_cache: dict = {}  # {currency: (rate, timestamp)}
@@ -289,16 +310,23 @@ def _resolve_signal_outcome(sig: dict) -> dict | None:
 
 
 async def _ensure_models_trained(bot=None) -> None:
+    trained_lines = []
     for symbol, model in models.items():
         if model.needs_retrain():
             outcome_data = get_outcome_training_data(symbol=symbol)
             ok = model.train(outcome_data=outcome_data)
-            if bot and ok and ADMIN_CHAT_ID:
-                await bot.send_message(
-                    chat_id=ADMIN_CHAT_ID,
-                    text=f"🧠 Model retrained for *{symbol}* ({len(outcome_data)} real outcomes blended)",
-                    parse_mode="Markdown",
-                )
+            if ok:
+                trigger = "outcomes" if len(outcome_data) >= 3 else "time"
+                trained_lines.append(_train_summary_line(symbol, len(outcome_data), trigger))
+    if trained_lines and bot and ADMIN_CHAT_ID:
+        try:
+            await bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text="🧠 *Models retrained*\n\n" + "\n".join(trained_lines),
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
 
 
 # ── Outcome checker ───────────────────────────────────────────────────────────
@@ -392,6 +420,7 @@ async def continuous_learning(context: ContextTypes.DEFAULT_TYPE) -> None:
 
             outcome_data = get_outcome_training_data(symbol=symbol)
             ok = model.train(outcome_data or None)
+            trigger = "outcomes" if new_outcomes >= 3 else "time"
             log_learning_cycle(
                 symbol,
                 retrain_needed=True,
@@ -401,7 +430,7 @@ async def continuous_learning(context: ContextTypes.DEFAULT_TYPE) -> None:
                 note="retrained" if ok else "retrain_failed",
             )
             if ok:
-                retrained.append(symbol)
+                retrained.append((symbol, len(outcome_data or []), trigger))
                 logger.info(
                     f"[ML] Retrained {symbol} — outcomes since last train: "
                     f"{current_count - model.outcome_count_at_train}"
@@ -419,10 +448,10 @@ async def continuous_learning(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if retrained and ADMIN_CHAT_ID:
         try:
+            lines = [_train_summary_line(sym, n, trig) for sym, n, trig in retrained]
             await context.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
-                text=f"🧠 *ML auto-retrain* — {', '.join(retrained)}\n"
-                     f"_(triggered by new outcomes)_",
+                text="🧠 *Auto-retrain complete*\n\n" + "\n".join(lines),
                 parse_mode="Markdown",
             )
         except Exception:
@@ -731,14 +760,12 @@ def _channel_message(sig: dict, session: str) -> str:
 async def _broadcast_signal(bot, sig: dict, session: str = "open") -> None:
     if not CHANNEL_ID:
         return
-    admin_pref = get_user_pref(ADMIN_CHAT_ID) if ADMIN_CHAT_ID else {}
-    ch_lang = admin_pref.get("lang", "en")
-    ch_mode = admin_pref.get("mode", "beginner")
+    # Channel is always English expert — language personalisation is for private DMs only
     _, cs, fx = _get_display_currency()
-    body = signal_msg(sig, lang=ch_lang, mode=ch_mode, currency_symbol=cs, fx_rate=fx)
+    body = signal_msg(sig, lang="en", mode="expert", currency_symbol=cs, fx_rate=fx)
     cet_time = datetime.now(CET).strftime("%H:%M")
     tz_label = "CEST" if datetime.now(CET).dst() else "CET"
-    session_label = "  ·  🌅 پیش‌بازار" if (session == "pre" and ch_lang == "fa") else ("  ·  🌅 Pre-market" if session == "pre" else "")
+    session_label = "  ·  🌅 Pre-market" if session == "pre" else ""
     body += f"\n━━━━━━━━━━━━━━━━━━━\n⏱ `{cet_time} {tz_label}`{session_label}  ·  #{sig['symbol']}"
     if sig["action"] == "BUY" and BOT_USERNAME:
         deep_link = (

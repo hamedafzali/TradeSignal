@@ -623,6 +623,15 @@ _HTML = """<!DOCTYPE html>
               <div class="small mt-1 text-muted">Price, TP and SL in Telegram signals will be shown in this currency</div>
             </div>
 
+            <div class="col-md-4">
+              <label class="small text-muted">Default Market</label>
+              <select id="set-default_market" class="form-control mt-1">
+                <option value="us">🇺🇸 US — NYSE / NASDAQ (09:30–16:00 ET)</option>
+                <option value="xetra">🇩🇪 XETRA — Frankfurt / Trade Republic (09:00–17:30 CET)</option>
+              </select>
+              <div class="small mt-1 text-muted">Applies to symbols without an explicit market override. Switch to XETRA to use German trading hours.</div>
+            </div>
+
           </div>
           <div class="d-flex gap-3 align-items-center mt-3">
             <button class="btn" style="background:var(--surface2);color:var(--accent);border:1px solid var(--border);padding:6px 20px"
@@ -1022,7 +1031,7 @@ async function loadSettings() {
   const s = await fetch('/api/settings').then(r => r.json());
   const keys = ['sentiment_provider','news_provider','sentiment_suppress_threshold',
                  'finnhub_api_key','gemini_api_key','claude_api_key','sentiment_local_url','news_lookback_hours',
-                 'outcome_notify_admin','display_currency'];
+                 'outcome_notify_admin','display_currency','default_market'];
   for (const k of keys) {
     const el = document.getElementById('set-' + k);
     if (el && s[k] !== undefined) el.value = s[k];
@@ -1049,7 +1058,7 @@ async function saveSettings() {
   msg.textContent = 'Saving…';
   const keys = ['sentiment_provider','news_provider','sentiment_suppress_threshold',
                  'finnhub_api_key','gemini_api_key','claude_api_key','sentiment_local_url','news_lookback_hours',
-                 'outcome_notify_admin','display_currency'];
+                 'outcome_notify_admin','display_currency','default_market'];
   const payload = {};
   for (const k of keys) {
     const el = document.getElementById('set-' + k);
