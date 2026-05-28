@@ -62,7 +62,7 @@ from database import (
     unsubscribe_user,
     update_outcome,
 )
-from ml_signals import StockModel, build_features
+from ml_signals import StockModel, build_features, get_predict_market_context
 from sentiment import get_sentiment, should_suppress, refresh_cache as refresh_sentiment
 from signals import (
     _atr, _macd, _rsi,
@@ -175,7 +175,8 @@ async def refresh_symbols(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def _current_features(df) -> dict:
     try:
-        return build_features(df).dropna().iloc[-1].to_dict()
+        spy_df, vix_df = get_predict_market_context()
+        return build_features(df, spy_df=spy_df, vix_df=vix_df).dropna().iloc[-1].to_dict()
     except Exception:
         return {}
 

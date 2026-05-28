@@ -18,8 +18,61 @@ RETRAIN_EVERY = int(os.getenv("RETRAIN_EVERY_SECONDS", "7200"))  # 2-hour fallba
 RETRAIN_OUTCOME_THRESHOLD = int(os.getenv("RETRAIN_OUTCOME_THRESHOLD", "3"))
 AI_SIGNAL_THRESHOLD = float(os.getenv("AI_SIGNAL_THRESHOLD", "0.65"))
 
+# ── Market context cache ──────────────────────────────────────────────────────
+_mkt_cache: dict = {"ts": 0.0, "spy": None, "vix": None}
+_MKT_TTL = 300  # seconds
 
-def build_features(df: pd.DataFrame) -> pd.DataFrame:
+
+def _get_market_ctx(period: str = "60d") -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    """SPY (1h) + VIX (1d) with 5-min in-memory cache. Both optional on failure."""
+    now = time.time()
+    if now - _mkt_cache["ts"] < _MKT_TTL and _mkt_cache["spy"] is not None:
+        return _mkt_cache["spy"], _mkt_cache["vix"]
+    spy, vix = None, None
+    try:
+        spy = yf.download("SPY", period=period, interval="1h", progress=False, auto_adjust=True)
+        if isinstance(spy.columns, pd.MultiIndex):
+            spy.columns = spy.columns.droplevel(1)
+        if spy.empty:
+            spy = None
+    except Exception as e:
+        logger.debug(f"[ML] SPY fetch failed: {e}")
+    try:
+        vix = yf.download("^VIX", period=period, interval="1d", progress=False, auto_adjust=True)
+        if isinstance(vix.columns, pd.MultiIndex):
+            vix.columns = vix.columns.droplevel(1)
+        if vix.empty:
+            vix = None
+    except Exception as e:
+        logger.debug(f"[ML] VIX fetch failed: {e}")
+    _mkt_cache.update({"ts": now, "spy": spy, "vix": vix})
+    return spy, vix
+
+
+def get_predict_market_context() -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    """Public export — bot.py uses this so feature capture shares the same cache."""
+    return _get_market_ctx()
+
+
+def _align(series: pd.Series, target: pd.Index) -> pd.Series:
+    """Reindex series to target using ffill, normalising timezones."""
+    try:
+        s = series.copy()
+        if getattr(s.index, "tz", None) != getattr(target, "tz", None):
+            if getattr(s.index, "tz", None) is None:
+                s.index = s.index.tz_localize("UTC")
+            if getattr(target, "tz", None) is not None:
+                s.index = s.index.tz_convert(target.tz)
+            else:
+                s.index = s.index.tz_localize(None)
+        return s.reindex(target, method="ffill")
+    except Exception:
+        return pd.Series(np.nan, index=target, dtype=float)
+
+
+def build_features(df: pd.DataFrame,
+                   spy_df: pd.DataFrame | None = None,
+                   vix_df: pd.DataFrame | None = None) -> pd.DataFrame:
     close = df["Close"].squeeze()
     high = df["High"].squeeze()
     low = df["Low"].squeeze()
@@ -67,6 +120,30 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
         (low - close.shift()).abs(),
     ], axis=1).max(axis=1)
     feat["atr_pct"] = tr.rolling(14).mean() / (close + 1e-9)
+
+    # ── Market context (optional) ────────────────────────────────────────────
+    # SPY relative strength: is this stock leading or lagging the broad market?
+    if spy_df is not None and not spy_df.empty:
+        try:
+            spy_c = _align(spy_df["Close"].squeeze(), feat.index)
+            feat["rel_str_1h"] = close.pct_change(1) - spy_c.pct_change(1)
+            feat["rel_str_8h"] = close.pct_change(8) - spy_c.pct_change(8)
+            spy_ema50 = spy_c.ewm(span=50, adjust=False).mean()
+            feat["spy_regime"] = (spy_c >= spy_ema50).astype(float) * 2 - 1  # +1 bull / -1 bear
+            spy_sma20 = spy_c.rolling(20).mean()
+            spy_std20 = spy_c.rolling(20).std()
+            feat["spy_bb_pos"] = (spy_c - spy_sma20) / (2 * spy_std20 + 1e-9)
+        except Exception as e:
+            logger.debug(f"[ML] SPY feature error: {e}")
+
+    # VIX regime: is fear elevated relative to recent average?
+    if vix_df is not None and not vix_df.empty:
+        try:
+            vix_c = _align(vix_df["Close"].squeeze(), feat.index)
+            vix_ma = vix_c.rolling(20, min_periods=1).mean()
+            feat["vix_norm"] = vix_c / (vix_ma + 1e-9)
+        except Exception as e:
+            logger.debug(f"[ML] VIX feature error: {e}")
 
     return feat
 
@@ -135,7 +212,8 @@ class StockModel:
                 logger.warning(f"[ML] Too little data for {self.symbol}")
                 return False
 
-            features = build_features(df)
+            spy_df, vix_df = _get_market_ctx()
+            features = build_features(df, spy_df=spy_df, vix_df=vix_df)
             labels = build_labels(df)
             combined = pd.concat([features, labels.rename("label")], axis=1).dropna()
 
@@ -197,7 +275,8 @@ class StockModel:
         if not self.trained or not self.feature_cols:
             return default
         try:
-            features = build_features(df)
+            spy_df, vix_df = _get_market_ctx()
+            features = build_features(df, spy_df=spy_df, vix_df=vix_df)
             row = features[self.feature_cols].dropna().iloc[-1:]
             if row.empty:
                 return default

@@ -29,9 +29,9 @@ logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logg
 logger = logging.getLogger(__name__)
 
 
-def _fetch(symbol: str, years: int = 2) -> pd.DataFrame:
+def _fetch(symbol: str, years: int = 2, interval: str = "1h") -> pd.DataFrame:
     period = f"{min(years * 365, 730)}d"
-    df = yf.download(symbol, period=period, interval="1h",
+    df = yf.download(symbol, period=period, interval=interval,
                      progress=False, auto_adjust=True)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.droplevel(1)
@@ -70,6 +70,31 @@ def bootstrap_symbol(symbol: str, years: int = 2,
     if len(df) < 300:
         logger.warning(f"[bootstrap] {symbol}: not enough data ({len(df)} bars)")
         return []
+
+    # Market context: fetch once, pre-align to symbol index to avoid look-ahead per bar
+    logger.info(f"[bootstrap] {symbol}: fetching market context (SPY/VIX)...")
+    spy_full = _fetch("SPY", years=years, interval="1h")
+    vix_full = _fetch("^VIX", years=years, interval="1d")
+
+    def _pre_align(mkt_df: pd.DataFrame, base_index) -> pd.DataFrame | None:
+        if mkt_df.empty:
+            return None
+        try:
+            s = mkt_df.copy()
+            if getattr(s.index, "tz", None) != getattr(base_index, "tz", None):
+                if getattr(s.index, "tz", None) is None:
+                    s.index = s.index.tz_localize("UTC")
+                if getattr(base_index, "tz", None) is not None:
+                    s.index = s.index.tz_convert(base_index.tz)
+                else:
+                    s.index = s.index.tz_localize(None)
+            return s.reindex(base_index, method="ffill")
+        except Exception as e:
+            logger.debug(f"[bootstrap] market align failed: {e}")
+            return None
+
+    spy_aligned = _pre_align(spy_full, df.index)
+    vix_aligned = _pre_align(vix_full, df.index)
 
     samples: list[dict] = []
     last_signal_bar = -999  # prevent same-direction repeat within 6 bars
@@ -111,9 +136,11 @@ def bootstrap_symbol(symbol: str, years: int = 2,
         outcome = _label_outcome(rule_sig["action"], entry, tp, sl,
                                  future_high, future_low)
 
-        # Capture ML features at signal bar
+        # Capture ML features at signal bar — include market context up to bar i
         try:
-            feat_df = build_features(window)
+            spy_w = spy_aligned.iloc[:i + 1] if spy_aligned is not None else None
+            vix_w = vix_aligned.iloc[:i + 1] if vix_aligned is not None else None
+            feat_df = build_features(window, spy_df=spy_w, vix_df=vix_w)
             feat_row = feat_df.dropna().iloc[-1]
             features = feat_row.to_dict()
         except Exception as e:
