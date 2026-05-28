@@ -71,7 +71,11 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     return feat
 
 
-def build_labels(df: pd.DataFrame, forward: int = 3, threshold: float = 0.003) -> pd.Series:
+def build_labels(df: pd.DataFrame, forward: int = 8, threshold: float = 0.008) -> pd.Series:
+    """
+    Label each bar by forward return over `forward` 1h bars.
+    Default 8h / 0.8% matches ATR×2.5 TP horizon better than the old 3h/0.3%.
+    """
     close = df["Close"].squeeze()
     ret = close.shift(-forward) / close - 1
     labels = pd.Series(0, index=df.index, dtype=int)
@@ -142,17 +146,18 @@ class StockModel:
             X = combined[self.feature_cols].values
             y = combined["label"].values
 
-            # Blend in confirmed real outcomes (repeat each 3x to give them weight)
+            # Blend in confirmed real outcomes — repeat 5x so live feedback
+            # has enough weight against ~600 synthetic rows
             if outcome_data:
                 extra_rows, extra_labels = [], []
                 for item in outcome_data:
                     row = [item["features"].get(col, 0.0) for col in self.feature_cols]
-                    extra_rows.extend([row] * 3)
-                    extra_labels.extend([item["label"]] * 3)
+                    extra_rows.extend([row] * 5)
+                    extra_labels.extend([item["label"]] * 5)
                 if extra_rows:
                     X = np.vstack([X, extra_rows])
                     y = np.concatenate([y, extra_labels])
-                    logger.info(f"[ML] {self.symbol}: blended {len(outcome_data)} real outcomes")
+                    logger.info(f"[ML] {self.symbol}: blended {len(outcome_data)} real outcomes (5x weight)")
 
             X_scaled = self.scaler.fit_transform(X)
             self.clf_buy.fit(X_scaled, (y == 1).astype(int))
@@ -201,10 +206,13 @@ class StockModel:
             buy_prob = float(self.clf_buy.predict_proba(X)[0][1])
             sell_prob = float(self.clf_sell.predict_proba(X)[0][1])
 
+            # Require a confidence gap: prevents mixed signals when both classifiers
+            # are uncertain (e.g. buy=0.67, sell=0.66 — model is not actually decided)
+            _GAP = 0.10
             ai_signal = None
-            if buy_prob > AI_SIGNAL_THRESHOLD:
+            if buy_prob > AI_SIGNAL_THRESHOLD and buy_prob > sell_prob + _GAP:
                 ai_signal = "BUY"
-            elif sell_prob > AI_SIGNAL_THRESHOLD:
+            elif sell_prob > AI_SIGNAL_THRESHOLD and sell_prob > buy_prob + _GAP:
                 ai_signal = "SELL"
 
             return {"buy_prob": buy_prob, "sell_prob": sell_prob, "ai_signal": ai_signal}
