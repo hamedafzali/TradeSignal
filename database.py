@@ -155,6 +155,19 @@ def init_db() -> None:
                 headlines    TEXT DEFAULT '[]',
                 computed_at  TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS ml_wf_results (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol        TEXT NOT NULL,
+                tested_at     TEXT NOT NULL,
+                train_bars    INTEGER,
+                test_bars     INTEGER,
+                rule_signals  INTEGER,
+                rule_win_rate REAL,
+                ai_signals    INTEGER,
+                ai_win_rate   REAL,
+                grade         TEXT
+            );
         """)
         # Migrate existing positions table if tp/sl columns missing
         cols = [r[1] for r in conn.execute("PRAGMA table_info(positions)").fetchall()]
@@ -1392,6 +1405,39 @@ def get_accuracy_by_direction() -> dict:
             "accuracy": round(r["correct"] / decisive * 100, 1) if decisive > 0 else None,
         }
     return result
+
+
+def log_wf_result(symbol: str, result: dict) -> None:
+    with _conn() as conn:
+        conn.execute("""
+            INSERT INTO ml_wf_results
+                (symbol, tested_at, train_bars, test_bars,
+                 rule_signals, rule_win_rate, ai_signals, ai_win_rate, grade)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            symbol,
+            datetime.utcnow().isoformat(),
+            result.get("train_bars"),
+            result.get("test_bars"),
+            result.get("rule_signals"),
+            result.get("rule_win_rate"),
+            result.get("ai_signals"),
+            result.get("ai_win_rate"),
+            result.get("grade"),
+        ))
+
+
+def get_wf_results() -> list[dict]:
+    """Most recent walk-forward result per symbol."""
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT * FROM ml_wf_results
+            WHERE id IN (
+                SELECT MAX(id) FROM ml_wf_results GROUP BY symbol
+            )
+            ORDER BY tested_at DESC
+        """).fetchall()
+        return [dict(r) for r in rows]
 
 
 def get_recent_signals(limit: int = 50) -> list[dict]:

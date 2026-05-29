@@ -6,6 +6,7 @@ import time
 import numpy as np
 import pandas as pd
 import yfinance as yf
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.preprocessing import StandardScaler
 
@@ -166,6 +167,8 @@ class StockModel:
         self.symbol = symbol
         self.clf_buy = GradientBoostingClassifier(n_estimators=120, max_depth=3, learning_rate=0.05, random_state=42)
         self.clf_sell = GradientBoostingClassifier(n_estimators=120, max_depth=3, learning_rate=0.05, random_state=42)
+        self.cal_buy: CalibratedClassifierCV | None = None
+        self.cal_sell: CalibratedClassifierCV | None = None
         self.scaler = StandardScaler()
         self.feature_cols: list[str] = []
         self.trained = False
@@ -238,8 +241,29 @@ class StockModel:
                     logger.info(f"[ML] {self.symbol}: blended {len(outcome_data)} real outcomes (5x weight)")
 
             X_scaled = self.scaler.fit_transform(X)
-            self.clf_buy.fit(X_scaled, (y == 1).astype(int))
-            self.clf_sell.fit(X_scaled, (y == -1).astype(int))
+
+            # Platt calibration: hold out 20% for calibration fit so probabilities
+            # are well-calibrated (65% confidence ≈ 65% real win rate)
+            n_cal = max(20, len(X_scaled) // 5)
+            if n_cal < len(X_scaled) - 50:
+                X_main, X_cal = X_scaled[:-n_cal], X_scaled[-n_cal:]
+                y_main, y_cal = y[:-n_cal], y[-n_cal:]
+            else:
+                X_main, X_cal = X_scaled, X_scaled
+                y_main, y_cal = y, y
+
+            self.clf_buy.fit(X_main, (y_main == 1).astype(int))
+            self.clf_sell.fit(X_main, (y_main == -1).astype(int))
+
+            try:
+                self.cal_buy = CalibratedClassifierCV(self.clf_buy, method="sigmoid", cv="prefit")
+                self.cal_buy.fit(X_cal, (y_cal == 1).astype(int))
+                self.cal_sell = CalibratedClassifierCV(self.clf_sell, method="sigmoid", cv="prefit")
+                self.cal_sell.fit(X_cal, (y_cal == -1).astype(int))
+            except Exception as e:
+                logger.debug(f"[ML] Calibration skipped for {self.symbol}: {e}")
+                self.cal_buy = None
+                self.cal_sell = None
 
             self.trained = True
             self.trained_at = time.time()
@@ -282,8 +306,10 @@ class StockModel:
                 return default
 
             X = self.scaler.transform(row.values)
-            buy_prob = float(self.clf_buy.predict_proba(X)[0][1])
-            sell_prob = float(self.clf_sell.predict_proba(X)[0][1])
+            buy_clf = self.cal_buy if self.cal_buy is not None else self.clf_buy
+            sell_clf = self.cal_sell if self.cal_sell is not None else self.clf_sell
+            buy_prob = float(buy_clf.predict_proba(X)[0][1])
+            sell_prob = float(sell_clf.predict_proba(X)[0][1])
 
             # Require a confidence gap: prevents mixed signals when both classifiers
             # are uncertain (e.g. buy=0.67, sell=0.66 — model is not actually decided)

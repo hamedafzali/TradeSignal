@@ -171,6 +171,55 @@ async def refresh_symbols(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info(f"[symbols] Removed model for {sym}")
 
 
+# ── Regime filter ─────────────────────────────────────────────────────────────
+
+def _is_hostile_regime(spy_df: "pd.DataFrame | None", vix_df: "pd.DataFrame | None",
+                       symbol_df_1h: "pd.DataFrame | None") -> tuple[bool, str]:
+    """
+    Returns (hostile: bool, reason: str).
+    Three independent conditions — any one triggers suppression:
+      1. VIX 2-day spike >30% while VIX >20 (fear spike)
+      2. SPY down >1.5% in last 8 hourly bars (intraday market sweep)
+      3. Symbol's 5-day ATR > 2× its 90-day ATR (abnormal volatility)
+    """
+    try:
+        if vix_df is not None and not vix_df.empty:
+            vix_c = vix_df["Close"].squeeze()
+            if len(vix_c) >= 3:
+                current_vix = float(vix_c.iloc[-1])
+                prior_vix = float(vix_c.iloc[-3])
+                if prior_vix > 0 and current_vix > 20:
+                    if (current_vix - prior_vix) / prior_vix > 0.30:
+                        return True, f"VIX spike {current_vix:.1f} (+{(current_vix-prior_vix)/prior_vix*100:.0f}%)"
+    except Exception:
+        pass
+
+    try:
+        if spy_df is not None and not spy_df.empty:
+            spy_c = spy_df["Close"].squeeze()
+            if len(spy_c) >= 9:
+                spy_now = float(spy_c.iloc[-1])
+                spy_8h  = float(spy_c.iloc[-9])
+                if spy_8h > 0 and (spy_now - spy_8h) / spy_8h < -0.015:
+                    return True, f"SPY 8h drop {(spy_now-spy_8h)/spy_8h*100:.1f}%"
+    except Exception:
+        pass
+
+    try:
+        if symbol_df_1h is not None and not symbol_df_1h.empty and len(symbol_df_1h) >= 90 * 6:
+            from signals import _atr
+            atr_series = _atr(symbol_df_1h)
+            if not atr_series.empty and len(atr_series) >= 90 * 6:
+                atr_5d  = float(atr_series.iloc[-5*6:].mean())
+                atr_90d = float(atr_series.iloc[-90*6:].mean())
+                if atr_90d > 0 and atr_5d > 2.0 * atr_90d:
+                    return True, f"ATR spike {atr_5d/atr_90d:.1f}× normal"
+    except Exception:
+        pass
+
+    return False, ""
+
+
 # ── ML helpers ────────────────────────────────────────────────────────────────
 
 def _current_features(df) -> dict:
@@ -509,6 +558,25 @@ async def process_action_requests(context: ContextTypes.DEFAULT_TYPE) -> None:
 
                     threading.Thread(target=_run, daemon=True, name="bootstrap").start()
                     note = f"bootstrap started in background (job_id={job_id})"
+            elif action == "run_walk_forward":
+                if any(t.name == "walk_forward" for t in threading.enumerate()):
+                    note = "walk-forward test already running — wait for it to finish"
+                else:
+                    symbols_wf = [symbol] if symbol else _get_symbols()
+                    if not symbols_wf:
+                        raise ValueError("no symbols for walk-forward test")
+                    job_id = start_training_job("walk_forward", total_symbols=len(symbols_wf))
+
+                    def _run_wf(jid=job_id, syms=symbols_wf):
+                        try:
+                            from bootstrap import run_walk_forward
+                            run_walk_forward(syms, job_id=jid)
+                        except Exception as exc:
+                            finish_training_job(jid, status="failed", note=str(exc)[:200])
+                            logger.error(f"[walk_forward] thread error: {exc}", exc_info=True)
+
+                    threading.Thread(target=_run_wf, daemon=True, name="walk_forward").start()
+                    note = f"walk-forward test started in background (job_id={job_id})"
             else:
                 raise ValueError(f"unsupported action {action}")
             complete_action_request(req["id"], "completed", note)
@@ -596,9 +664,19 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
                 else {"buy_prob": None, "sell_prob": None, "ai_signal": None}
             )
 
+            # Compute actual RSI from 5m data for AI-only signals (not the 50.0 default)
+            if rule_sig:
+                rsi = rule_sig["rsi"]
+            elif df_5m is not None and len(df_5m) >= 14:
+                try:
+                    rsi = float(_rsi(df_5m["Close"].squeeze()).iloc[-1])
+                except Exception:
+                    rsi = 50.0
+            else:
+                rsi = 50.0
+
             price = (rule_sig["price"] if rule_sig
                      else float(df_5m["Close"].squeeze().iloc[-1]) if df_5m is not None else 0.0)
-            rsi = rule_sig["rsi"] if rule_sig else 50.0
 
             sig = combine_signals(
                 rule_sig, ml_result, symbol, price, rsi,
@@ -624,6 +702,13 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
                 sig.setdefault("reasons", []).append(
                     f"News sentiment: {sentiment['label']} ({sentiment['score']:+.2f})"
                 )
+
+            # Regime filter — suppress during hostile macro conditions
+            spy_df_ctx, vix_df_ctx = get_predict_market_context()
+            hostile, regime_reason = _is_hostile_regime(spy_df_ctx, vix_df_ctx, df_1h)
+            if hostile:
+                logger.info(f"[regime] suppressed {sig['action']} {symbol}: {regime_reason}")
+                continue
 
             feat = _current_features(df_5m) if df_5m is not None else {}
             log_signal(sig, features=feat)

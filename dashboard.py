@@ -10,7 +10,7 @@ from database import (
     create_action_request, get_ops_snapshot,
     get_running_training_job, get_recent_training_jobs,
     get_all_settings, set_setting, get_all_sentiment_cache,
-    set_symbol_market, get_accuracy_by_direction,
+    set_symbol_market, get_accuracy_by_direction, get_wf_results,
 )
 
 app = Flask(__name__)
@@ -363,6 +363,34 @@ _HTML = """<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- Walk-forward validation results -->
+    <div class="row g-2 mb-2">
+      <div class="col-12">
+        <div class="card p-3">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <div class="section-head mb-0">🧪 Walk-Forward Validation — Out-of-Sample Grades</div>
+            <span style="color:var(--muted);font-size:.72rem">A≥58% · B 52-58% · C 47-52% · D&lt;47% · Trained on 75% of history, tested on last 25%</span>
+          </div>
+          <div id="wf-empty" class="text-muted small" style="display:none">No walk-forward results yet. Use the Action Center to run a test.</div>
+          <div class="table-responsive">
+            <table class="table table-hover mb-0" id="wf-table">
+              <thead><tr>
+                <th>Symbol</th>
+                <th>Grade</th>
+                <th>Rule Signals</th>
+                <th>Rule Win%</th>
+                <th>AI Signals</th>
+                <th>AI Win%</th>
+                <th>Test Bars</th>
+                <th>Tested</th>
+              </tr></thead>
+              <tbody id="wf-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="row g-2 mb-2">
       <div class="col-md-6">
         <div class="card p-3">
@@ -393,6 +421,7 @@ _HTML = """<!DOCTYPE html>
             <div class="col-6"><button class="btn action-btn" onclick="runAction('check_outcomes_now')">Check Outcomes Now</button></div>
             <div class="col-6"><button class="btn action-btn" onclick="runAction('retrain_all')">Retrain All Models</button></div>
             <div class="col-6"><button class="btn action-btn" style="border-color:#a78bfa40;color:#a78bfa" onclick="runAction('run_bootstrap')">🚀 Run Bootstrap</button></div>
+            <div class="col-6"><button class="btn action-btn" style="border-color:#38bdf840;color:#38bdf8" onclick="runAction('run_walk_forward')">🧪 Walk-Forward Test</button></div>
             <div class="col-12 d-flex gap-2">
               <select id="action-symbol" class="form-control" style="max-width:190px">
                 <option value="">Pick symbol</option>
@@ -1094,6 +1123,32 @@ async function refreshML() {
     trainRunsChart.data.datasets[0].data = runValues;
     trainRunsChart.update();
   }
+  // Walk-forward validation results
+  const wfData = await fetch('/api/wf-results').then(r=>r.json());
+  const gradeColor = {A:'#4ade80', B:'#86efac', C:'#fbbf24', D:'#f87171', 'N/A':'#555'};
+  const gradeTooltip = {A:'Strong edge (≥58%)', B:'Good (52–58%)', C:'Marginal (47–52%)', D:'Below random (<47%)', 'N/A':'Insufficient signals'};
+  const wfRows = wfData.map(r => {
+    const g = r.grade || 'N/A';
+    const gradeBadge = `<span style="font-weight:700;font-size:.95rem;color:${gradeColor[g]||'#555'}" title="${gradeTooltip[g]||''}">${g}</span>`;
+    const rwr = r.rule_win_rate != null ? `<span style="color:${r.rule_win_rate>=52?'#4ade80':r.rule_win_rate>=47?'#fbbf24':'#f87171'}">${r.rule_win_rate}%</span>` : '<span class="text-muted">—</span>';
+    const awr = r.ai_win_rate != null ? `<span style="color:${r.ai_win_rate>=52?'#4ade80':r.ai_win_rate>=47?'#fbbf24':'#f87171'}">${r.ai_win_rate}%</span>` : '<span class="text-muted">—</span>';
+    const tested = r.tested_at ? new Date(r.tested_at+'Z').toLocaleDateString() : '—';
+    return `<tr>
+      <td><span class="sym-tag">${r.symbol}</span></td>
+      <td>${gradeBadge}</td>
+      <td class="text-muted">${r.rule_signals ?? '—'}</td>
+      <td>${rwr}</td>
+      <td class="text-muted">${r.ai_signals ?? '—'}</td>
+      <td>${awr}</td>
+      <td class="text-muted">${r.test_bars ?? '—'}</td>
+      <td class="text-muted">${tested}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('wf-body').innerHTML = wfRows;
+  const wfEmpty = document.getElementById('wf-empty');
+  if (wfEmpty) wfEmpty.style.display = wfData.length ? 'none' : '';
+  if (!wfData.length) document.getElementById('wf-body').innerHTML =
+    '<tr><td colspan="8" class="text-center text-muted">No results yet — run Walk-Forward Test from Action Center</td></tr>';
   // ml-confidence-note removed from DOM — no-op
 }
 
@@ -1748,7 +1803,7 @@ def api_actions():
     data = request.get_json(force=True)
     action = (data.get("action") or "").strip()
     symbol = (data.get("symbol") or "").strip().upper() or None
-    allowed = {"scan_now", "check_outcomes_now", "retrain_all", "retrain_symbol", "run_bootstrap"}
+    allowed = {"scan_now", "check_outcomes_now", "retrain_all", "retrain_symbol", "run_bootstrap", "run_walk_forward"}
     if action not in allowed:
         return jsonify({"ok": False, "error": "Unsupported action"}), 400
     if action == "retrain_symbol" and not symbol:
@@ -1874,6 +1929,11 @@ def api_fx_rate():
 @app.route("/api/accuracy-direction")
 def api_accuracy_direction():
     return jsonify(get_accuracy_by_direction())
+
+
+@app.route("/api/wf-results")
+def api_wf_results():
+    return jsonify(get_wf_results())
 
 
 @app.route("/api/symbols/<symbol>/market", methods=["POST"])

@@ -340,9 +340,9 @@ def signal_from_df(symbol: str, df: pd.DataFrame,
     ema_bull = float(ema9.iloc[-1]) > float(ema21.iloc[-1])
     ema_bear = float(ema9.iloc[-1]) < float(ema21.iloc[-1])
 
-    # RSI thresholds: 35/65 (tighter than classic 40/60) — reduces noise on 5m candles
-    rsi_oversold  = rsi_now < 35
-    rsi_overbought = rsi_now > 65
+    # RSI thresholds: 40/60 on 5m candles — 35/65 was too tight and killed rule signals
+    rsi_oversold  = rsi_now < 40
+    rsi_overbought = rsi_now > 60
     buy_hits  = [rsi_oversold,  macd_bull, ema_bull]
     sell_hits = [rsi_overbought, macd_bear, ema_bear]
     trend = _trend(df_1h) if df_1h is not None and not df_1h.empty else "unknown"
@@ -452,6 +452,20 @@ def combine_signals(rule_sig: dict | None, ml_result: dict,
     elif ai_signal:
         prob = buy_prob if ai_signal == "BUY" else sell_prob
         if prob is not None and prob >= 0.70:
+            # RSI gate: AI-only BUY must not be overbought; AI-only SELL must not be oversold
+            if ai_signal == "BUY" and rsi > 60:
+                print(f"[signals] AI BUY blocked on {symbol}: RSI {rsi:.1f} overbought")
+                return None
+            if ai_signal == "SELL" and rsi < 40:
+                print(f"[signals] AI SELL blocked on {symbol}: RSI {rsi:.1f} oversold")
+                return None
+            # AI-only signals require 1h bias agreement — no bias means no confirmation
+            if bias_1h is None:
+                print(f"[signals] AI {ai_signal} blocked on {symbol}: no 1h bias confirmation")
+                return None
+            if bias_1h != ai_signal:
+                # already handled below but guard here too
+                return None
             atr_val = 0.0
             trend = "unknown"
             if df_5m is not None and not df_5m.empty:
