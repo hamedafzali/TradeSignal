@@ -171,6 +171,31 @@ async def refresh_symbols(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info(f"[symbols] Removed model for {sym}")
 
 
+# ── Per-symbol AI capability cache ───────────────────────────────────────────
+import time as _time
+_ai_capable_cache: dict = {"ts": 0.0, "data": {}}
+_AI_CAPABLE_TTL = 3600  # re-read bootstrap rates once per hour
+_AI_MIN_BOOTSTRAP_WR = 52.0  # disable AI-only for symbols below this bootstrap win rate
+
+
+def _is_ai_capable(symbol: str) -> bool:
+    """Return False for symbols whose bootstrap win rate is below threshold."""
+    now = _time.time()
+    if now - _ai_capable_cache["ts"] > _AI_CAPABLE_TTL:
+        try:
+            from database import get_ml_accuracy_stats
+            stats = get_ml_accuracy_stats()
+            _ai_capable_cache["data"] = {
+                sym: (d.get("bootstrap_win_rate") or 0.0)
+                for sym, d in stats["per_symbol"].items()
+            }
+            _ai_capable_cache["ts"] = now
+        except Exception:
+            pass
+    wr = _ai_capable_cache["data"].get(symbol, 100.0)  # unknown = allow
+    return wr >= _AI_MIN_BOOTSTRAP_WR or wr == 0.0  # 0.0 = never bootstrapped = allow
+
+
 # ── Regime filter ─────────────────────────────────────────────────────────────
 
 def _is_hostile_regime(spy_df: "pd.DataFrame | None", vix_df: "pd.DataFrame | None",
@@ -702,6 +727,11 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
                 sig.setdefault("reasons", []).append(
                     f"News sentiment: {sentiment['label']} ({sentiment['score']:+.2f})"
                 )
+
+            # Suppress AI-only signals for symbols with poor bootstrap accuracy
+            if sig.get("strength") == "AI" and not _is_ai_capable(symbol):
+                logger.info(f"[quality] suppressed AI-only {sig['action']} {symbol}: bootstrap WR below {_AI_MIN_BOOTSTRAP_WR}%")
+                continue
 
             # Regime filter — suppress during hostile macro conditions
             spy_df_ctx, vix_df_ctx = get_predict_market_context()

@@ -340,6 +340,12 @@ def signal_from_df(symbol: str, df: pd.DataFrame,
     ema_bull = float(ema9.iloc[-1]) > float(ema21.iloc[-1])
     ema_bear = float(ema9.iloc[-1]) < float(ema21.iloc[-1])
 
+    # 5m medium-term trend: EMA50 slope over last 3 bars
+    # Prevents buying a falling knife when RSI oversold but price still in freefall
+    ema50 = close.ewm(span=50, adjust=False).mean()
+    ema50_rising  = float(ema50.iloc[-1]) > float(ema50.iloc[-4]) if len(ema50) >= 4 else True
+    ema50_falling = float(ema50.iloc[-1]) < float(ema50.iloc[-4]) if len(ema50) >= 4 else True
+
     # RSI thresholds: 40/60 on 5m candles — 35/65 was too tight and killed rule signals
     rsi_oversold  = rsi_now < 40
     rsi_overbought = rsi_now > 60
@@ -393,9 +399,10 @@ def signal_from_df(symbol: str, df: pd.DataFrame,
         }
 
     # RSI is mandatory — prevents pure trend-chasing signals (MACD+EMA agree but RSI neutral)
-    if rsi_oversold and sum(buy_hits) >= 2 and has_vol:
+    # EMA50 slope guard: don't buy when 5m medium-term trend is still falling (falling knife)
+    if rsi_oversold and sum(buy_hits) >= 2 and has_vol and ema50_rising:
         return _make("BUY", reasons_buy)
-    if rsi_overbought and sum(sell_hits) >= 2 and has_vol:
+    if rsi_overbought and sum(sell_hits) >= 2 and has_vol and ema50_falling:
         return _make("SELL", reasons_sell)
     return None
 

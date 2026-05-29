@@ -150,16 +150,75 @@ def build_features(df: pd.DataFrame,
 
 
 def build_labels(df: pd.DataFrame, forward: int = 8, threshold: float = 0.008) -> pd.Series:
-    """
-    Label each bar by forward return over `forward` 1h bars.
-    Default 8h / 0.8% matches ATR×2.5 TP horizon better than the old 3h/0.3%.
-    """
+    """Simple forward-return labels — kept for bootstrap compatibility."""
     close = df["Close"].squeeze()
     ret = close.shift(-forward) / close - 1
     labels = pd.Series(0, index=df.index, dtype=int)
     labels[ret > threshold] = 1
     labels[ret < -threshold] = -1
     return labels
+
+
+def build_labels_tpsl(df: pd.DataFrame,
+                      sl_mult: float = 1.5, tp_mult: float = 2.5,
+                      outcome_bars: int = 24) -> tuple["pd.Series", "pd.Series"]:
+    """
+    TP/SL-aligned labels matching the live outcome resolution logic exactly.
+    Returns (y_buy, y_sell) — both are 0/1 series where 1 = "this direction wins".
+    Eliminates the train/live mismatch of forward-return labeling.
+    """
+    close = df["Close"].squeeze()
+    high  = df["High"].squeeze()
+    low   = df["Low"].squeeze()
+
+    tr = pd.concat([
+        high - low,
+        (high - close.shift()).abs(),
+        (low - close.shift()).abs(),
+    ], axis=1).max(axis=1)
+    atr = tr.rolling(14).mean()
+
+    n = len(df)
+    y_buy  = pd.Series(0, index=df.index, dtype=int)
+    y_sell = pd.Series(0, index=df.index, dtype=int)
+
+    for i in range(14, n - outcome_bars):
+        atr_val = float(atr.iloc[i])
+        if np.isnan(atr_val) or atr_val <= 0:
+            continue
+        entry = float(close.iloc[i])
+        tp_buy  = entry + atr_val * tp_mult
+        sl_buy  = entry - atr_val * sl_mult
+        tp_sell = entry - atr_val * tp_mult
+        sl_sell = entry + atr_val * sl_mult
+
+        buy_result = sell_result = 0
+        for j in range(i + 1, i + 1 + outcome_bars):
+            h = float(high.iloc[j])
+            l = float(low.iloc[j])
+            # BUY outcome
+            if buy_result == 0:
+                if h >= tp_buy and l <= sl_buy:
+                    buy_result = 0   # ambiguous
+                elif h >= tp_buy:
+                    buy_result = 1   # TP hit
+                elif l <= sl_buy:
+                    buy_result = -1  # SL hit — resolved, stop looking
+            # SELL outcome
+            if sell_result == 0:
+                if l <= tp_sell and h >= sl_sell:
+                    sell_result = 0
+                elif l <= tp_sell:
+                    sell_result = 1   # TP hit for sell
+                elif h >= sl_sell:
+                    sell_result = -1  # SL hit for sell
+            if buy_result != 0 and sell_result != 0:
+                break
+
+        y_buy.iloc[i]  = 1 if buy_result  == 1 else 0
+        y_sell.iloc[i] = 1 if sell_result == 1 else 0
+
+    return y_buy, y_sell
 
 
 class StockModel:
@@ -217,49 +276,61 @@ class StockModel:
 
             spy_df, vix_df = _get_market_ctx()
             features = build_features(df, spy_df=spy_df, vix_df=vix_df)
-            labels = build_labels(df)
-            combined = pd.concat([features, labels.rename("label")], axis=1).dropna()
+
+            # TP/SL-aligned labels: train buy/sell classifiers independently
+            # with objectives that exactly match live outcome resolution
+            y_buy_raw, y_sell_raw = build_labels_tpsl(df)
+            combined = pd.concat(
+                [features, y_buy_raw.rename("y_buy"), y_sell_raw.rename("y_sell")],
+                axis=1
+            ).dropna()
 
             if len(combined) < 100:
                 return False
 
-            self.feature_cols = [c for c in combined.columns if c != "label"]
+            self.feature_cols = [c for c in combined.columns
+                                  if c not in ("y_buy", "y_sell")]
             X = combined[self.feature_cols].values
-            y = combined["label"].values
+            y_buy  = combined["y_buy"].values
+            y_sell = combined["y_sell"].values
 
-            # Blend in confirmed real outcomes — repeat 5x so live feedback
-            # has enough weight against ~600 synthetic rows
+            # Blend confirmed real outcomes (5x weight vs ~600 synthetic rows)
             if outcome_data:
-                extra_rows, extra_labels = [], []
+                extra_rows, extra_buy, extra_sell = [], [], []
                 for item in outcome_data:
                     row = [item["features"].get(col, 0.0) for col in self.feature_cols]
+                    lbl = item["label"]
+                    # label +1 = BUY won, -1 = SELL won
                     extra_rows.extend([row] * 5)
-                    extra_labels.extend([item["label"]] * 5)
+                    extra_buy.extend([1 if lbl == 1 else 0] * 5)
+                    extra_sell.extend([1 if lbl == -1 else 0] * 5)
                 if extra_rows:
-                    X = np.vstack([X, extra_rows])
-                    y = np.concatenate([y, extra_labels])
+                    X      = np.vstack([X, extra_rows])
+                    y_buy  = np.concatenate([y_buy,  extra_buy])
+                    y_sell = np.concatenate([y_sell, extra_sell])
                     logger.info(f"[ML] {self.symbol}: blended {len(outcome_data)} real outcomes (5x weight)")
 
             X_scaled = self.scaler.fit_transform(X)
 
-            # Platt calibration: hold out 20% for calibration fit so probabilities
-            # are well-calibrated (65% confidence ≈ 65% real win rate)
+            # Platt calibration: hold out last 20% as calibration set
             n_cal = max(20, len(X_scaled) // 5)
             if n_cal < len(X_scaled) - 50:
-                X_main, X_cal = X_scaled[:-n_cal], X_scaled[-n_cal:]
-                y_main, y_cal = y[:-n_cal], y[-n_cal:]
+                X_main, X_cal   = X_scaled[:-n_cal], X_scaled[-n_cal:]
+                yb_main, yb_cal = y_buy[:-n_cal],   y_buy[-n_cal:]
+                ys_main, ys_cal = y_sell[:-n_cal],  y_sell[-n_cal:]
             else:
-                X_main, X_cal = X_scaled, X_scaled
-                y_main, y_cal = y, y
+                X_main, X_cal   = X_scaled, X_scaled
+                yb_main, yb_cal = y_buy,  y_buy
+                ys_main, ys_cal = y_sell, y_sell
 
-            self.clf_buy.fit(X_main, (y_main == 1).astype(int))
-            self.clf_sell.fit(X_main, (y_main == -1).astype(int))
+            self.clf_buy.fit(X_main, yb_main)
+            self.clf_sell.fit(X_main, ys_main)
 
             try:
                 self.cal_buy = CalibratedClassifierCV(self.clf_buy, method="sigmoid", cv="prefit")
-                self.cal_buy.fit(X_cal, (y_cal == 1).astype(int))
+                self.cal_buy.fit(X_cal, yb_cal)
                 self.cal_sell = CalibratedClassifierCV(self.clf_sell, method="sigmoid", cv="prefit")
-                self.cal_sell.fit(X_cal, (y_cal == -1).astype(int))
+                self.cal_sell.fit(X_cal, ys_cal)
             except Exception as e:
                 logger.debug(f"[ML] Calibration skipped for {self.symbol}: {e}")
                 self.cal_buy = None
