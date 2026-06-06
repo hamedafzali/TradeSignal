@@ -16,7 +16,7 @@ CACHE_DIR = os.path.join(os.path.dirname(__file__), ".model_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 RETRAIN_EVERY = int(os.getenv("RETRAIN_EVERY_SECONDS", "7200"))  # 2-hour fallback
-RETRAIN_OUTCOME_THRESHOLD = int(os.getenv("RETRAIN_OUTCOME_THRESHOLD", "3"))
+RETRAIN_OUTCOME_THRESHOLD = int(os.getenv("RETRAIN_OUTCOME_THRESHOLD", "25"))
 AI_SIGNAL_THRESHOLD = float(os.getenv("AI_SIGNAL_THRESHOLD", "0.65"))
 
 # ── Market context cache ──────────────────────────────────────────────────────
@@ -74,13 +74,15 @@ def _align(series: pd.Series, target: pd.Index) -> pd.Series:
 def build_features(df: pd.DataFrame,
                    spy_df: pd.DataFrame | None = None,
                    vix_df: pd.DataFrame | None = None) -> pd.DataFrame:
-    close = df["Close"].squeeze()
-    high = df["High"].squeeze()
-    low = df["Low"].squeeze()
+    close  = df["Close"].squeeze()
+    high   = df["High"].squeeze()
+    low    = df["Low"].squeeze()
     volume = df["Volume"].squeeze()
+    open_  = df["Open"].squeeze() if "Open" in df.columns else close
 
     feat = pd.DataFrame(index=df.index)
 
+    # ── Direction features ────────────────────────────────────────────────────
     # RSI
     delta = close.diff()
     gain = delta.where(delta > 0, 0.0)
@@ -89,55 +91,90 @@ def build_features(df: pd.DataFrame,
     al = loss.ewm(com=13, min_periods=14).mean()
     feat["rsi"] = 100 - (100 / (1 + ag / al))
 
-    # MACD
+    # MACD histogram (normalized by price to be scale-invariant)
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
-    macd = ema12 - ema26
-    sig = macd.ewm(span=9, adjust=False).mean()
-    feat["macd_hist"] = (macd - sig) / close  # normalized
-
-    # EMA ratio
-    ema9 = close.ewm(span=9, adjust=False).mean()
-    ema21 = close.ewm(span=21, adjust=False).mean()
-    feat["ema_ratio"] = ema9 / ema21 - 1
-
-    # Price momentum
-    for p in [3, 5, 10, 20]:
-        feat[f"roc_{p}"] = close.pct_change(p)
+    macd  = ema12 - ema26
+    sig   = macd.ewm(span=9, adjust=False).mean()
+    feat["macd_hist"] = (macd - sig) / (close + 1e-9)
 
     # Bollinger Band position
     sma20 = close.rolling(20).mean()
     std20 = close.rolling(20).std()
     feat["bb_pos"] = (close - sma20) / (2 * std20 + 1e-9)
 
-    # Volume ratio
+    # Volume ratio (current vs 20-bar average)
     vol_ma = volume.rolling(20).mean()
     feat["vol_ratio"] = volume / (vol_ma + 1e-9)
 
-    # ATR (normalized)
+    # ── ATR base (used by multiple features below) ────────────────────────────
     tr = pd.concat([
         high - low,
         (high - close.shift()).abs(),
-        (low - close.shift()).abs(),
+        (low  - close.shift()).abs(),
     ], axis=1).max(axis=1)
-    feat["atr_pct"] = tr.rolling(14).mean() / (close + 1e-9)
+    atr = tr.rolling(14).mean()
+    feat["atr_pct"] = atr / (close + 1e-9)
 
-    # ── Market context (optional) ────────────────────────────────────────────
-    # SPY relative strength: is this stock leading or lagging the broad market?
+    # ── Volatility regime features (key for TP/SL reachability) ──────────────
+    # ATR percentile vs 90-bar rolling distribution — is vol expanding or contracting?
+    feat["atr_percentile"] = atr.rolling(90, min_periods=20).rank(pct=True)
+
+    # Garman-Klass volatility (uses OHLC — more efficient than close-only)
+    # Measures realized volatility including intrabar range
+    log_hl = (np.log(high / (low + 1e-9))) ** 2
+    log_co = (np.log(close / (open_ + 1e-9))) ** 2
+    feat["gk_vol"] = (0.5 * log_hl - (2 * np.log(2) - 1) * log_co).rolling(14).mean()
+
+    # Volatility-of-volatility: is vol regime stable or chaotic?
+    feat["vol_of_vol"] = feat["atr_pct"].rolling(20).std()
+
+    # ── Momentum quality features ─────────────────────────────────────────────
+    # Momentum over two horizons (removed roc_3, roc_5 — subsumed)
+    feat["roc_10"] = close.pct_change(10)
+    feat["roc_20"] = close.pct_change(20)
+
+    # Momentum consistency: what fraction of bars in last 10 moved in positive direction?
+    # High consistency = persistent trend; low = choppy
+    feat["mom_consistency"] = close.pct_change().rolling(10).apply(
+        lambda x: float((x > 0).mean()), raw=False
+    )
+
+    # Momentum acceleration: is the move getting faster or slower?
+    feat["mom_accel"] = close.pct_change(5) - close.pct_change(20)
+
+    # ── Price structure ───────────────────────────────────────────────────────
+    # VWAP spread: proxy for institutional vs retail positioning
+    typical = (high + low + close) / 3
+    vwap_approx = (typical * volume).rolling(20).sum() / (volume.rolling(20).sum() + 1e-9)
+    feat["vwap_spread"] = (close - vwap_approx) / (atr + 1e-9)
+
+    # ── Time features (cyclical encoding — intraday patterns are real) ────────
+    try:
+        idx = feat.index
+        hour = idx.hour if hasattr(idx, "hour") else pd.Series(0, index=idx)
+        dow  = idx.dayofweek if hasattr(idx, "dayofweek") else pd.Series(0, index=idx)
+        feat["hour_sin"] = np.sin(2 * np.pi * hour / 24)
+        feat["hour_cos"] = np.cos(2 * np.pi * hour / 24)
+        feat["dow_sin"]  = np.sin(2 * np.pi * dow / 5)
+        feat["dow_cos"]  = np.cos(2 * np.pi * dow / 5)
+    except Exception:
+        pass
+
+    # ── Market context (optional — gracefully absent if fetch fails) ──────────
     if spy_df is not None and not spy_df.empty:
         try:
             spy_c = _align(spy_df["Close"].squeeze(), feat.index)
             feat["rel_str_1h"] = close.pct_change(1) - spy_c.pct_change(1)
             feat["rel_str_8h"] = close.pct_change(8) - spy_c.pct_change(8)
             spy_ema50 = spy_c.ewm(span=50, adjust=False).mean()
-            feat["spy_regime"] = (spy_c >= spy_ema50).astype(float) * 2 - 1  # +1 bull / -1 bear
+            feat["spy_regime"] = (spy_c >= spy_ema50).astype(float) * 2 - 1
             spy_sma20 = spy_c.rolling(20).mean()
             spy_std20 = spy_c.rolling(20).std()
             feat["spy_bb_pos"] = (spy_c - spy_sma20) / (2 * spy_std20 + 1e-9)
         except Exception as e:
             logger.debug(f"[ML] SPY feature error: {e}")
 
-    # VIX regime: is fear elevated relative to recent average?
     if vix_df is not None and not vix_df.empty:
         try:
             vix_c = _align(vix_df["Close"].squeeze(), feat.index)
@@ -224,17 +261,33 @@ def build_labels_tpsl(df: pd.DataFrame,
 class StockModel:
     def __init__(self, symbol: str):
         self.symbol = symbol
-        self.clf_buy = GradientBoostingClassifier(n_estimators=120, max_depth=3, learning_rate=0.05, random_state=42)
+
+        # ── 1h model: used for bias/confirmation on hourly candles ──────────
+        self.clf_buy  = GradientBoostingClassifier(n_estimators=120, max_depth=3, learning_rate=0.05, random_state=42)
         self.clf_sell = GradientBoostingClassifier(n_estimators=120, max_depth=3, learning_rate=0.05, random_state=42)
-        self.cal_buy: CalibratedClassifierCV | None = None
+        self.cal_buy:  CalibratedClassifierCV | None = None
         self.cal_sell: CalibratedClassifierCV | None = None
-        self.scaler = StandardScaler()
+        self.scaler       = StandardScaler()
         self.feature_cols: list[str] = []
-        self.trained = False
-        self.trained_at = 0.0
-        self.train_samples = 0
-        self.outcome_samples = 0
-        self.outcome_count_at_train = 0  # resolved outcome count when last trained
+        self.trained      = False
+
+        # ── 5m model: trained on 5m candles to confirm 5m rule signals ──────
+        # The 1h model learned hourly patterns and cannot reliably confirm signals
+        # that fired on 5m bars — RSI/MACD/EMA values are statistically different
+        # across timeframes. The 5m model uses the same feature set but learns
+        # the distribution of those features at 5m resolution.
+        self.clf_buy_5m  = GradientBoostingClassifier(n_estimators=120, max_depth=3, learning_rate=0.05, random_state=42)
+        self.clf_sell_5m = GradientBoostingClassifier(n_estimators=120, max_depth=3, learning_rate=0.05, random_state=42)
+        self.cal_buy_5m:  CalibratedClassifierCV | None = None
+        self.cal_sell_5m: CalibratedClassifierCV | None = None
+        self.scaler_5m       = StandardScaler()
+        self.feature_cols_5m: list[str] = []
+        self.trained_5m       = False
+
+        self.trained_at   = 0.0
+        self.train_samples    = 0
+        self.outcome_samples  = 0
+        self.outcome_count_at_train = 0
         self._path = os.path.join(CACHE_DIR, f"{symbol}.pkl")
         self._load()
 
@@ -294,37 +347,56 @@ class StockModel:
             y_buy  = combined["y_buy"].values
             y_sell = combined["y_sell"].values
 
-            # Blend confirmed real outcomes (5x weight vs ~600 synthetic rows)
+            # Blend real outcomes using sample_weight (5x) instead of row duplication.
+            # Row duplication causes GBM to memorise exact feature vectors at those
+            # outcome bars — sample_weight applies the same boost via the loss function
+            # without creating near-duplicate rows that overfit.
+            sample_weight_buy  = np.ones(len(X))
+            sample_weight_sell = np.ones(len(X))
             if outcome_data:
                 extra_rows, extra_buy, extra_sell = [], [], []
                 for item in outcome_data:
                     row = [item["features"].get(col, 0.0) for col in self.feature_cols]
                     lbl = item["label"]
-                    # label +1 = BUY won, -1 = SELL won
-                    extra_rows.extend([row] * 5)
-                    extra_buy.extend([1 if lbl == 1 else 0] * 5)
-                    extra_sell.extend([1 if lbl == -1 else 0] * 5)
+                    extra_rows.append(row)
+                    extra_buy.append(1 if lbl == 1 else 0)
+                    extra_sell.append(1 if lbl == -1 else 0)
                 if extra_rows:
+                    n_real = len(extra_rows)
                     X      = np.vstack([X, extra_rows])
                     y_buy  = np.concatenate([y_buy,  extra_buy])
                     y_sell = np.concatenate([y_sell, extra_sell])
-                    logger.info(f"[ML] {self.symbol}: blended {len(outcome_data)} real outcomes (5x weight)")
+                    # 5x weight applied via sample_weight, not row repetition
+                    sample_weight_buy  = np.concatenate([np.ones(len(X) - n_real), np.full(n_real, 5.0)])
+                    sample_weight_sell = sample_weight_buy.copy()
+                    logger.info(f"[ML] {self.symbol}: blended {n_real} real outcomes (5x sample_weight)")
 
-            X_scaled = self.scaler.fit_transform(X)
-
-            # Platt calibration: hold out last 20% as calibration set
-            n_cal = max(20, len(X_scaled) // 5)
-            if n_cal < len(X_scaled) - 50:
-                X_main, X_cal   = X_scaled[:-n_cal], X_scaled[-n_cal:]
-                yb_main, yb_cal = y_buy[:-n_cal],   y_buy[-n_cal:]
-                ys_main, ys_cal = y_sell[:-n_cal],  y_sell[-n_cal:]
+            # Split raw X before fitting the scaler — prevents calibration-set
+            # distribution from leaking into the scaler's mean/variance.
+            n_cal = max(20, len(X) // 5)
+            if n_cal < len(X) - 50:
+                X_main_raw, X_cal_raw = X[:-n_cal], X[-n_cal:]
+                yb_main, yb_cal       = y_buy[:-n_cal],  y_buy[-n_cal:]
+                ys_main, ys_cal       = y_sell[:-n_cal], y_sell[-n_cal:]
             else:
-                X_main, X_cal   = X_scaled, X_scaled
-                yb_main, yb_cal = y_buy,  y_buy
-                ys_main, ys_cal = y_sell, y_sell
+                X_main_raw, X_cal_raw = X, X
+                yb_main, yb_cal       = y_buy,  y_buy
+                ys_main, ys_cal       = y_sell, y_sell
 
-            self.clf_buy.fit(X_main, yb_main)
-            self.clf_sell.fit(X_main, ys_main)
+            X_main = self.scaler.fit_transform(X_main_raw)   # fit ONLY on train
+            X_cal  = self.scaler.transform(X_cal_raw)         # transform without refit
+
+            n_main = len(X_main)
+            sw_buy_main  = sample_weight_buy[:n_main]
+            sw_sell_main = sample_weight_sell[:n_main]
+            self.clf_buy.fit(X_main, yb_main, sample_weight=sw_buy_main)
+            self.clf_sell.fit(X_main, ys_main, sample_weight=sw_sell_main)
+
+            # Log top-5 features by importance so we can detect noise dominance
+            imp = self.clf_buy.feature_importances_
+            top5 = sorted(zip(self.feature_cols, imp), key=lambda x: -x[1])[:5]
+            logger.info(f"[ML] {self.symbol} 1h top features: " +
+                        " | ".join(f"{n}={v:.3f}" for n, v in top5))
 
             try:
                 self.cal_buy = CalibratedClassifierCV(self.clf_buy, method="sigmoid", cv="prefit")
@@ -358,32 +430,132 @@ class StockModel:
                 except Exception:
                     pass
 
-            logger.info(f"[ML] {self.symbol} trained on {len(X)} samples")
+            logger.info(f"[ML] {self.symbol} 1h model trained on {len(X)} samples")
+            # Also train the 5m-specific model so it is ready for 5m rule confirmation
+            self.train_5m(_log=False)
             return True
         except Exception as e:
             logger.error(f"[ML] Train error for {self.symbol}: {e}")
             return False
 
-    def predict(self, df: pd.DataFrame) -> dict:
-        """Returns buy_prob, sell_prob, ai_signal for the latest candle."""
+    def train_5m(self, _log: bool = True) -> bool:
+        """
+        Train the 5m-specific classifier pair on 5 days of 5-minute candles.
+        ~1,950 bars vs ~420 from 60d/1h — 4-5× more training data at the right
+        resolution for confirming 5m rule signals.
+        """
+        logger.info(f"[ML] Training 5m model for {self.symbol}...")
+        try:
+            # yfinance supports up to 60 days for 5m interval (~4,680 bars)
+            # vs "5d" giving only 390 bars — use full range for robust training
+            df = yf.download(self.symbol, period="60d", interval="5m",
+                             progress=False, auto_adjust=True)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(1)
+            if len(df) < 200:
+                logger.warning(f"[ML] Too little 5m data for {self.symbol} ({len(df)} bars)")
+                return False
+
+            spy_df, vix_df = _get_market_ctx()
+            features = build_features(df, spy_df=spy_df, vix_df=vix_df)
+
+            # Use the same TP/SL label logic — outcome_bars=24 means 24×5m = 2h horizon
+            y_buy_raw, y_sell_raw = build_labels_tpsl(
+                df, sl_mult=1.5, tp_mult=2.5, outcome_bars=24
+            )
+            combined = pd.concat(
+                [features, y_buy_raw.rename("y_buy"), y_sell_raw.rename("y_sell")],
+                axis=1
+            ).dropna()
+
+            if len(combined) < 100:
+                logger.warning(f"[ML] Too few 5m label samples for {self.symbol}")
+                return False
+
+            self.feature_cols_5m = [c for c in combined.columns
+                                    if c not in ("y_buy", "y_sell")]
+            X      = combined[self.feature_cols_5m].values
+            y_buy  = combined["y_buy"].values
+            y_sell = combined["y_sell"].values
+
+            # Scaler: fit only on training partition
+            n_cal = max(20, len(X) // 5)
+            if n_cal < len(X) - 50:
+                X_main_raw, X_cal_raw = X[:-n_cal], X[-n_cal:]
+                yb_main, yb_cal       = y_buy[:-n_cal],  y_buy[-n_cal:]
+                ys_main, ys_cal       = y_sell[:-n_cal], y_sell[-n_cal:]
+            else:
+                X_main_raw, X_cal_raw = X, X
+                yb_main, yb_cal       = y_buy, y_buy
+                ys_main, ys_cal       = y_sell, y_sell
+
+            X_main = self.scaler_5m.fit_transform(X_main_raw)
+            X_cal  = self.scaler_5m.transform(X_cal_raw)
+
+            self.clf_buy_5m.fit(X_main, yb_main)
+            self.clf_sell_5m.fit(X_main, ys_main)
+
+            try:
+                self.cal_buy_5m = CalibratedClassifierCV(self.clf_buy_5m, method="sigmoid", cv="prefit")
+                self.cal_buy_5m.fit(X_cal, yb_cal)
+                self.cal_sell_5m = CalibratedClassifierCV(self.clf_sell_5m, method="sigmoid", cv="prefit")
+                self.cal_sell_5m.fit(X_cal, ys_cal)
+            except Exception as e:
+                logger.debug(f"[ML] 5m calibration skipped for {self.symbol}: {e}")
+                self.cal_buy_5m  = None
+                self.cal_sell_5m = None
+
+            self.trained_5m = True
+            self._save()
+            logger.info(f"[ML] {self.symbol} 5m model trained on {len(X)} samples")
+            return True
+        except Exception as e:
+            logger.error(f"[ML] 5m train error for {self.symbol}: {e}")
+            return False
+
+    def predict(self, df: pd.DataFrame, timeframe: str = "1h") -> dict:
+        """
+        Returns buy_prob, sell_prob, ai_signal for the latest candle.
+        timeframe='5m' → uses the 5m-trained model (correct for confirming 5m rule signals)
+        timeframe='1h' → uses the 1h-trained model (for bias/directional context)
+        Falls back to the 1h model if 5m model is not yet trained.
+        """
         default = {"buy_prob": None, "sell_prob": None, "ai_signal": None}
-        if not self.trained or not self.feature_cols:
+
+        use_5m = (timeframe == "5m") and self.trained_5m and self.feature_cols_5m
+        if use_5m:
+            trained_ok   = self.trained_5m
+            feature_cols = self.feature_cols_5m
+            scaler       = self.scaler_5m
+            buy_clf      = self.cal_buy_5m  if self.cal_buy_5m  is not None else self.clf_buy_5m
+            sell_clf     = self.cal_sell_5m if self.cal_sell_5m is not None else self.clf_sell_5m
+        else:
+            trained_ok   = self.trained
+            feature_cols = self.feature_cols
+            scaler       = self.scaler
+            buy_clf      = self.cal_buy  if self.cal_buy  is not None else self.clf_buy
+            sell_clf     = self.cal_sell if self.cal_sell is not None else self.clf_sell
+
+        if not trained_ok or not feature_cols:
             return default
+
         try:
             spy_df, vix_df = _get_market_ctx()
             features = build_features(df, spy_df=spy_df, vix_df=vix_df)
-            row = features[self.feature_cols].dropna().iloc[-1:]
+
+            available_cols = [c for c in feature_cols if c in features.columns]
+            if len(available_cols) < len(feature_cols):
+                missing = set(feature_cols) - set(available_cols)
+                logger.debug(f"[ML] {self.symbol}: missing features at predict: {missing}")
+
+            row = features[available_cols].dropna().iloc[-1:]
             if row.empty:
                 return default
 
-            X = self.scaler.transform(row.values)
-            buy_clf = self.cal_buy if self.cal_buy is not None else self.clf_buy
-            sell_clf = self.cal_sell if self.cal_sell is not None else self.clf_sell
-            buy_prob = float(buy_clf.predict_proba(X)[0][1])
+            X = scaler.transform(row.values)
+            buy_prob  = float(buy_clf.predict_proba(X)[0][1])
             sell_prob = float(sell_clf.predict_proba(X)[0][1])
 
-            # Require a confidence gap: prevents mixed signals when both classifiers
-            # are uncertain (e.g. buy=0.67, sell=0.66 — model is not actually decided)
             _GAP = 0.10
             ai_signal = None
             if buy_prob > AI_SIGNAL_THRESHOLD and buy_prob > sell_prob + _GAP:

@@ -343,8 +343,9 @@ def signal_from_df(symbol: str, df: pd.DataFrame,
     # 5m medium-term trend: EMA50 slope over last 3 bars
     # Prevents buying a falling knife when RSI oversold but price still in freefall
     ema50 = close.ewm(span=50, adjust=False).mean()
-    ema50_rising  = float(ema50.iloc[-1]) > float(ema50.iloc[-4]) if len(ema50) >= 4 else True
-    ema50_falling = float(ema50.iloc[-1]) < float(ema50.iloc[-4]) if len(ema50) >= 4 else True
+    # Default False: insufficient data should block the guard, not pass it
+    ema50_rising  = float(ema50.iloc[-1]) > float(ema50.iloc[-4]) if len(ema50) >= 4 else False
+    ema50_falling = float(ema50.iloc[-1]) < float(ema50.iloc[-4]) if len(ema50) >= 4 else False
 
     # RSI thresholds: 40/60 on 5m candles — 35/65 was too tight and killed rule signals
     rsi_oversold  = rsi_now < 40

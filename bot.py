@@ -177,6 +177,20 @@ _ai_capable_cache: dict = {"ts": 0.0, "data": {}}
 _AI_CAPABLE_TTL = 3600  # re-read bootstrap rates once per hour
 _AI_MIN_BOOTSTRAP_WR = 52.0  # disable AI-only for symbols below this bootstrap win rate
 
+# ── Performance brake ─────────────────────────────────────────────────────────
+# Track last 20 signal outcomes. If win rate drops below 42% for 20 consecutive
+# resolved signals, halve the scan frequency (fire every other scan cycle).
+_PERF_BRAKE_WINDOW   = 20
+_PERF_BRAKE_THRESHOLD = 0.42  # below this → engage brake
+_perf_history: list[bool] = []  # True = correct, False = incorrect
+_perf_brake_engaged       = False
+_perf_scan_counter        = 0   # counts scan_and_alert() calls; odd calls skipped when brake on
+
+# ── Concurrent signal limit ───────────────────────────────────────────────────
+# Prevent firing more than 3 signals in the same direction per scan cycle.
+# Correlated positions (e.g. all tech stocks BUY at open) amplify drawdowns.
+_MAX_SAME_DIRECTION_PER_SCAN = 3
+
 
 def _is_ai_capable(symbol: str) -> bool:
     """Return False for symbols whose bootstrap win rate is below threshold."""
@@ -431,6 +445,11 @@ async def check_outcomes(context: ContextTypes.DEFAULT_TYPE) -> None:
             outcome = resolved["outcome"]
 
             update_outcome(sig["id"], outcome, resolved["price"], metadata=resolved.get("metadata"))
+
+            # Feed outcome into performance brake tracker
+            if outcome in ("correct", "incorrect"):
+                _update_perf_brake(outcome == "correct")
+
             entry = sig["price"]
             pct = (current_price - entry) / entry * 100
             sign = "+" if pct >= 0 else ""
@@ -666,8 +685,35 @@ async def monitor_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ── Scanner ───────────────────────────────────────────────────────────────────
 
+def _update_perf_brake(outcome_correct: bool) -> None:
+    """Call after each resolved outcome to maintain the performance brake state."""
+    global _perf_brake_engaged
+    _perf_history.append(outcome_correct)
+    if len(_perf_history) > _PERF_BRAKE_WINDOW:
+        _perf_history.pop(0)
+    if len(_perf_history) >= _PERF_BRAKE_WINDOW:
+        wr = sum(_perf_history) / len(_perf_history)
+        _perf_brake_engaged = wr < _PERF_BRAKE_THRESHOLD
+        if _perf_brake_engaged:
+            logger.warning(
+                f"[perf_brake] ENGAGED: last {_PERF_BRAKE_WINDOW} outcomes WR={wr:.1%} "
+                f"— halving signal frequency until performance recovers"
+            )
+
+
 async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
+    global _perf_scan_counter
+    _perf_scan_counter += 1
+
+    # Performance brake: skip every other scan when recent win rate is critically low
+    if _perf_brake_engaged and (_perf_scan_counter % 2 == 0):
+        logger.info("[perf_brake] scan skipped — brake engaged")
+        return
+
     await _ensure_models_trained(context.bot)
+
+    # Concurrent direction counters — reset each scan cycle
+    direction_count: dict[str, int] = {"BUY": 0, "SELL": 0}
 
     for symbol in _get_symbols():
         # Skip non-crypto outside regular market hours (9:30am–4:00pm ET)
@@ -684,10 +730,15 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
             rule_sig, df_5m = get_signal(symbol, df_1h=df_1h)
 
             model = models.get(symbol)
-            ml_result = (
-                model.predict(df_1h) if model and df_1h is not None and not df_1h.empty
-                else {"buy_prob": None, "sell_prob": None, "ai_signal": None}
-            )
+            # Use 5m model to confirm 5m rule signals — the 1h model was trained on
+            # hourly patterns and produces uncorrelated predictions on 5m bars.
+            # Falls back to 1h model if 5m model not yet trained.
+            if model and df_5m is not None and not df_5m.empty:
+                ml_result = model.predict(df_5m, timeframe="5m")
+            elif model and df_1h is not None and not df_1h.empty:
+                ml_result = model.predict(df_1h, timeframe="1h")
+            else:
+                ml_result = {"buy_prob": None, "sell_prob": None, "ai_signal": None}
 
             # Compute actual RSI from 5m data for AI-only signals (not the 50.0 default)
             if rule_sig:
@@ -738,6 +789,17 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
             hostile, regime_reason = _is_hostile_regime(spy_df_ctx, vix_df_ctx, df_1h)
             if hostile:
                 logger.info(f"[regime] suppressed {sig['action']} {symbol}: {regime_reason}")
+                continue
+
+            # Concurrent direction limit: max 3 same-direction signals per scan cycle.
+            # Prevents correlated position accumulation (e.g. 8 tech stocks all BUY).
+            action = sig["action"]
+            direction_count[action] = direction_count.get(action, 0) + 1
+            if direction_count[action] > _MAX_SAME_DIRECTION_PER_SCAN:
+                logger.info(
+                    f"[concurrent] suppressed {action} {symbol}: "
+                    f"already {_MAX_SAME_DIRECTION_PER_SCAN} {action} signals this scan"
+                )
                 continue
 
             feat = _current_features(df_5m) if df_5m is not None else {}
