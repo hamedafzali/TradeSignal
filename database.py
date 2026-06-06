@@ -183,6 +183,7 @@ def init_db() -> None:
             "resolution_minutes": "REAL",
             "max_favorable_pct": "REAL",
             "max_adverse_pct": "REAL",
+            "suggested_size_pct": "REAL",
         }
         for col, sql_type in signal_migrations.items():
             if col not in signal_cols:
@@ -230,8 +231,9 @@ def log_signal(sig: dict, features: dict | None = None) -> int:
         cur = conn.execute("""
             INSERT INTO signals
                 (symbol, action, strength, price, tp, sl, tp_pct, sl_pct, rr,
-                 rsi, trend, quality, ai_confidence, vol_spike, reasons, features, sent_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 rsi, trend, quality, ai_confidence, vol_spike, reasons, features,
+                 sent_at, suggested_size_pct)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             sig["symbol"], sig["action"], sig.get("strength", "RULE"),
             sig.get("price"), sig.get("tp"), sig.get("sl"),
@@ -241,6 +243,7 @@ def log_signal(sig: dict, features: dict | None = None) -> int:
             json.dumps(sig.get("reasons", [])),
             json.dumps(features or {}),
             datetime.utcnow().isoformat(),
+            sig.get("suggested_size_pct"),
         ))
         return cur.lastrowid
 
@@ -1455,3 +1458,180 @@ def get_recent_signals(limit: int = 50) -> list[dict]:
             d["reasons"] = json.loads(d["reasons"] or "[]")
             result.append(d)
         return result
+
+
+def get_rolling_performance(days: int = 30, window: int = 20) -> dict:
+    """
+    Rolling win rate over time — used for equity curve and performance trend charts.
+
+    Returns:
+      - daily: [{date, win_rate_7d, win_rate_30d, correct, incorrect}] — one row per day
+      - by_strength: {STRONG/RULE/AI: {total, correct, win_rate}} over the last `days`
+      - by_symbol: {symbol: {total, correct, win_rate}} over the last `days`
+      - rolling_20: [bool] — last 20 resolved outcomes for performance brake display
+    """
+    with _conn() as conn:
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+
+        # All resolved outcomes ordered by outcome_at
+        all_rows = conn.execute("""
+            SELECT DATE(outcome_at) AS day, outcome, strength, symbol
+            FROM signals
+            WHERE outcome IN ('correct', 'incorrect')
+              AND symbol IN (SELECT symbol FROM symbols WHERE active=1)
+            ORDER BY outcome_at ASC
+        """).fetchall()
+
+        # Rolling 7-day and 30-day win rate per calendar day
+        from collections import deque
+        daily_map: dict[str, dict] = {}
+        buf_7: deque = deque()
+        buf_30: deque = deque()
+
+        for r in all_rows:
+            day = r["day"]
+            is_correct = r["outcome"] == "correct"
+            buf_7.append((day, is_correct))
+            buf_30.append((day, is_correct))
+            # Trim to 7-day window
+            while buf_7 and buf_7[0][0] < (
+                datetime.fromisoformat(day) - timedelta(days=7)
+            ).date().isoformat():
+                buf_7.popleft()
+            while buf_30 and buf_30[0][0] < (
+                datetime.fromisoformat(day) - timedelta(days=30)
+            ).date().isoformat():
+                buf_30.popleft()
+
+            if day not in daily_map:
+                daily_map[day] = {"correct": 0, "incorrect": 0}
+            daily_map[day]["correct" if is_correct else "incorrect"] += 1
+
+            wr7  = round(sum(1 for _, v in buf_7  if v) / max(1, len(buf_7))  * 100, 1)
+            wr30 = round(sum(1 for _, v in buf_30 if v) / max(1, len(buf_30)) * 100, 1)
+            daily_map[day]["win_rate_7d"]  = wr7
+            daily_map[day]["win_rate_30d"] = wr30
+
+        daily = [{"date": d, **v} for d, v in sorted(daily_map.items())]
+
+        # By strength (last `days`)
+        strength_rows = conn.execute("""
+            SELECT strength,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN outcome='correct' THEN 1 ELSE 0 END) AS correct
+            FROM signals
+            WHERE outcome IN ('correct','incorrect')
+              AND outcome_at >= ?
+              AND symbol IN (SELECT symbol FROM symbols WHERE active=1)
+            GROUP BY strength
+        """, (cutoff,)).fetchall()
+        by_strength = {}
+        for r in strength_rows:
+            s = r["strength"] or "RULE"
+            wr = round(r["correct"] / r["total"] * 100, 1) if r["total"] else 0
+            by_strength[s] = {"total": r["total"], "correct": r["correct"], "win_rate": wr}
+
+        # By symbol (last `days`)
+        sym_rows = conn.execute("""
+            SELECT symbol,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN outcome='correct' THEN 1 ELSE 0 END) AS correct
+            FROM signals
+            WHERE outcome IN ('correct','incorrect')
+              AND outcome_at >= ?
+              AND symbol IN (SELECT symbol FROM symbols WHERE active=1)
+            GROUP BY symbol
+        """, (cutoff,)).fetchall()
+        by_symbol = {}
+        for r in sym_rows:
+            wr = round(r["correct"] / r["total"] * 100, 1) if r["total"] else 0
+            by_symbol[r["symbol"]] = {"total": r["total"], "correct": r["correct"], "win_rate": wr}
+
+        # Last `window` outcomes for performance brake status
+        recent = conn.execute("""
+            SELECT outcome FROM signals
+            WHERE outcome IN ('correct','incorrect')
+              AND symbol IN (SELECT symbol FROM symbols WHERE active=1)
+            ORDER BY outcome_at DESC LIMIT ?
+        """, (window,)).fetchall()
+        rolling = [r["outcome"] == "correct" for r in reversed(recent)]
+
+    return {
+        "daily": daily,
+        "by_strength": by_strength,
+        "by_symbol": by_symbol,
+        "rolling_20": rolling,
+    }
+
+
+def get_equity_curve(trade_size: float = 1000.0) -> dict:
+    """
+    Simulated equity curve treating every resolved signal as `trade_size` USD.
+
+    Win:  +trade_size * tp_pct / 100
+    Loss: -trade_size * sl_pct / 100
+    Neutral: 0
+
+    Returns:
+      - curve: [{date, equity, drawdown_pct}]  — cumulative P&L over time
+      - peak: float — all-time equity peak
+      - current: float — current equity
+      - max_drawdown_pct: float — worst peak-to-trough drawdown
+      - total_trades: int
+      - win_rate: float
+    """
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT outcome, tp_pct, sl_pct, outcome_at, strength, symbol
+            FROM signals
+            WHERE outcome IN ('correct', 'incorrect', 'neutral')
+              AND outcome_at IS NOT NULL
+              AND symbol IN (SELECT symbol FROM symbols WHERE active=1)
+            ORDER BY outcome_at ASC
+        """).fetchall()
+
+    equity = 0.0
+    peak   = 0.0
+    max_dd = 0.0
+    correct = 0
+    total   = 0
+    curve   = []
+
+    for r in rows:
+        tp_pct = r["tp_pct"] or 0.0
+        sl_pct = r["sl_pct"] or 0.0
+
+        if r["outcome"] == "correct":
+            pnl = trade_size * tp_pct / 100
+            correct += 1
+            total += 1
+        elif r["outcome"] == "incorrect":
+            pnl = -(trade_size * sl_pct / 100)
+            total += 1
+        else:
+            pnl = 0.0
+
+        equity += pnl
+        if equity > peak:
+            peak = equity
+        dd = round((peak - equity) / max(1.0, peak + trade_size) * 100, 2) if peak > 0 else 0.0
+        if dd > max_dd:
+            max_dd = dd
+
+        curve.append({
+            "date": r["outcome_at"][:10],
+            "equity": round(equity, 2),
+            "drawdown_pct": dd,
+            "strength": r["strength"],
+            "symbol": r["symbol"],
+            "outcome": r["outcome"],
+        })
+
+    return {
+        "curve": curve,
+        "peak": round(peak, 2),
+        "current": round(equity, 2),
+        "max_drawdown_pct": round(max_dd, 2),
+        "total_trades": total,
+        "win_rate": round(correct / total * 100, 1) if total else 0,
+    }

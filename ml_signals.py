@@ -513,12 +513,20 @@ class StockModel:
             logger.error(f"[ML] 5m train error for {self.symbol}: {e}")
             return False
 
-    def predict(self, df: pd.DataFrame, timeframe: str = "1h") -> dict:
+    def predict(self, df: pd.DataFrame, timeframe: str = "1h",
+                sentiment_score: float = 0.0,
+                sentiment_momentum: float = 0.0) -> dict:
         """
         Returns buy_prob, sell_prob, ai_signal for the latest candle.
         timeframe='5m' → uses the 5m-trained model (correct for confirming 5m rule signals)
         timeframe='1h' → uses the 1h-trained model (for bias/directional context)
         Falls back to the 1h model if 5m model is not yet trained.
+
+        sentiment_score ∈ [-1, 1]: live FinBERT/Gemini score.
+          Positive → boosts buy_prob, dampens sell_prob.
+          Trained models use 0.0 baseline; inference applies a soft ±20% adjustment.
+        sentiment_momentum ∈ [-2, 2]: current score minus score 3h ago.
+          Adds directional velocity signal on top of the point-in-time score.
         """
         default = {"buy_prob": None, "sell_prob": None, "ai_signal": None}
 
@@ -555,6 +563,17 @@ class StockModel:
             X = scaler.transform(row.values)
             buy_prob  = float(buy_clf.predict_proba(X)[0][1])
             sell_prob = float(sell_clf.predict_proba(X)[0][1])
+
+            # Soft sentiment adjustment — replaces the hard binary sentiment gate.
+            # Each point of |sentiment_score| adjusts probabilities by ±_SENTIMENT_WEIGHT.
+            # sentiment_momentum adds a velocity component (dampened by 0.5).
+            _SENTIMENT_WEIGHT = 0.20
+            _MOMENTUM_WEIGHT  = 0.08
+            sentiment_adj = (sentiment_score * _SENTIMENT_WEIGHT +
+                             sentiment_momentum * _MOMENTUM_WEIGHT)
+            if sentiment_adj != 0.0:
+                buy_prob  = float(np.clip(buy_prob  * (1.0 + sentiment_adj), 0.01, 0.99))
+                sell_prob = float(np.clip(sell_prob * (1.0 - sentiment_adj), 0.01, 0.99))
 
             _GAP = 0.10
             ai_signal = None

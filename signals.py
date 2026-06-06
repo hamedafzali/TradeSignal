@@ -199,6 +199,29 @@ def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
+def _kelly_size(win_rate_pct: float, rr: float,
+                max_pct: float = 10.0, half: bool = True) -> float:
+    """
+    Half-Kelly position size as a percentage of portfolio.
+
+    f = (b*p - q) / b   where b=RR, p=win_rate, q=1-p
+    Half-Kelly: multiply by 0.5 for safety margin.
+    Clamped to [0, max_pct].
+
+    Returns 0.0 when the signal has no positive expectancy.
+    """
+    if rr <= 0 or win_rate_pct <= 0:
+        return 0.0
+    p = win_rate_pct / 100.0
+    q = 1.0 - p
+    b = rr
+    kelly = (b * p - q) / b
+    if kelly <= 0:
+        return 0.0
+    size = kelly * (0.5 if half else 1.0) * 100.0
+    return round(_clamp(size, 0.0, max_pct), 2)
+
+
 def _adaptive_tp_sl(price: float, atr_val: float, symbol: str) -> tuple[float, float, str | None]:
     """
     Returns (sl_mult, tp_mult, note). Falls back to defaults when there
@@ -390,6 +413,14 @@ def signal_from_df(symbol: str, df: pd.DataFrame,
         # Always positive: tp_pct = profit%, sl_pct = loss%
         tp_pct = round(abs(tp - price) / price * 100, 2)
         sl_pct = round(abs(sl - price) / price * 100, 2)
+        # Half-Kelly size using symbol walk-forward win rate when available
+        try:
+            from database import get_wf_results as _wfr
+            wf = {r["symbol"]: r for r in _wfr()}
+            wr = wf.get(symbol, {}).get("rule_win_rate") or 50.0
+        except Exception:
+            wr = 50.0
+        size_pct = _kelly_size(wr, rr)
         return {
             "symbol": symbol, "action": action, "price": price,
             "tp": tp, "sl": sl, "tp_pct": tp_pct, "sl_pct": sl_pct, "rr": rr,
@@ -397,6 +428,7 @@ def signal_from_df(symbol: str, df: pd.DataFrame,
             "vol_spike": has_vol_spike, "reasons": reasons,
             "strength": "RULE", "ai_confidence": None, "quality": 0,
             "sl_mult": round(sl_mult, 2), "tp_mult": round(tp_mult, 2),
+            "suggested_size_pct": size_pct,
         }
 
     # RSI is mandatory — prevents pure trend-chasing signals (MACD+EMA agree but RSI neutral)
@@ -491,6 +523,12 @@ def combine_signals(rule_sig: dict | None, ml_result: dict,
             tp_pct = round(abs(tp - price) / price * 100, 2)
             sl_pct = round(abs(sl - price) / price * 100, 2)
             rr = round(tp_dist / sl_dist, 1) if sl_dist > 0 else 0
+            try:
+                from database import get_wf_results as _wfr
+                wf = {r["symbol"]: r for r in _wfr()}
+                ai_wr = wf.get(symbol, {}).get("ai_win_rate") or 50.0
+            except Exception:
+                ai_wr = 50.0
             sig = {
                 "symbol": symbol, "action": ai_signal, "price": price,
                 "tp": tp, "sl": sl, "tp_pct": tp_pct, "sl_pct": sl_pct, "rr": rr,
@@ -499,6 +537,7 @@ def combine_signals(rule_sig: dict | None, ml_result: dict,
                 "reasons": [f"AI model confidence {prob * 100:.0f}%"] + ([adaptive_note] if adaptive_note else []),
                 "strength": "AI", "ai_confidence": prob, "quality": 0,
                 "sl_mult": round(sl_mult, 2), "tp_mult": round(tp_mult, 2),
+                "suggested_size_pct": _kelly_size(ai_wr, rr),
             }
 
     if sig is None:

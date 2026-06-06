@@ -63,7 +63,7 @@ from database import (
     update_outcome,
 )
 from ml_signals import StockModel, build_features, get_predict_market_context
-from sentiment import get_sentiment, should_suppress, refresh_cache as refresh_sentiment
+from sentiment import get_sentiment, refresh_cache as refresh_sentiment
 from signals import (
     _atr, _macd, _rsi,
     combine_signals,
@@ -180,8 +180,10 @@ _AI_MIN_BOOTSTRAP_WR = 52.0  # disable AI-only for symbols below this bootstrap 
 # ── Performance brake ─────────────────────────────────────────────────────────
 # Track last 20 signal outcomes. If win rate drops below 42% for 20 consecutive
 # resolved signals, halve the scan frequency (fire every other scan cycle).
-_PERF_BRAKE_WINDOW   = 20
-_PERF_BRAKE_THRESHOLD = 0.42  # below this → engage brake
+_PERF_BRAKE_WINDOW    = 20
+_PERF_BRAKE_THRESHOLD = 0.42   # below this → engage brake (normal)
+_PERF_BRAKE_DD_THRESHOLD = 0.35  # tightened threshold when drawdown > 5%
+_PERF_BRAKE_DD_LIMIT  = 5.0   # drawdown % that triggers the tighter brake
 _perf_history: list[bool] = []  # True = correct, False = incorrect
 _perf_brake_engaged       = False
 _perf_scan_counter        = 0   # counts scan_and_alert() calls; odd calls skipped when brake on
@@ -190,6 +192,11 @@ _perf_scan_counter        = 0   # counts scan_and_alert() calls; odd calls skipp
 # Prevent firing more than 3 signals in the same direction per scan cycle.
 # Correlated positions (e.g. all tech stocks BUY at open) amplify drawdowns.
 _MAX_SAME_DIRECTION_PER_SCAN = 3
+
+# ── Sentiment history for momentum computation ────────────────────────────────
+# Tracks (unix_timestamp, score) per symbol to compute 3h sentiment momentum.
+_sentiment_history: dict[str, list[tuple[float, float]]] = {}
+_SENTIMENT_MOMENTUM_WINDOW = 10800  # 3 hours in seconds
 
 
 def _is_ai_capable(symbol: str) -> bool:
@@ -693,10 +700,19 @@ def _update_perf_brake(outcome_correct: bool) -> None:
         _perf_history.pop(0)
     if len(_perf_history) >= _PERF_BRAKE_WINDOW:
         wr = sum(_perf_history) / len(_perf_history)
-        _perf_brake_engaged = wr < _PERF_BRAKE_THRESHOLD
+        # Check current drawdown — tighten brake threshold during deep drawdowns
+        try:
+            from database import get_equity_curve
+            eq = get_equity_curve()
+            in_drawdown = eq["max_drawdown_pct"] >= _PERF_BRAKE_DD_LIMIT
+        except Exception:
+            in_drawdown = False
+        threshold = _PERF_BRAKE_DD_THRESHOLD if in_drawdown else _PERF_BRAKE_THRESHOLD
+        _perf_brake_engaged = wr < threshold
         if _perf_brake_engaged:
             logger.warning(
                 f"[perf_brake] ENGAGED: last {_PERF_BRAKE_WINDOW} outcomes WR={wr:.1%} "
+                f"threshold={threshold:.0%} drawdown={in_drawdown} "
                 f"— halving signal frequency until performance recovers"
             )
 
@@ -730,13 +746,34 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
             rule_sig, df_5m = get_signal(symbol, df_1h=df_1h)
 
             model = models.get(symbol)
+
+            # Get live sentiment and compute momentum before calling predict.
+            # sentiment_score flows into ML probability adjustment (soft, continuous)
+            # instead of the old hard binary suppress gate.
+            sentiment = get_sentiment(symbol)
+            s_score = float(sentiment.get("score", 0.0))
+            now_ts  = _time.time()
+            hist = _sentiment_history.setdefault(symbol, [])
+            hist.append((now_ts, s_score))
+            # Trim entries older than 3h
+            _sentiment_history[symbol] = [(t, s) for t, s in hist
+                                          if now_ts - t <= _SENTIMENT_MOMENTUM_WINDOW]
+            if len(_sentiment_history[symbol]) >= 2:
+                s_momentum = s_score - _sentiment_history[symbol][0][1]
+            else:
+                s_momentum = 0.0
+
             # Use 5m model to confirm 5m rule signals — the 1h model was trained on
             # hourly patterns and produces uncorrelated predictions on 5m bars.
             # Falls back to 1h model if 5m model not yet trained.
             if model and df_5m is not None and not df_5m.empty:
-                ml_result = model.predict(df_5m, timeframe="5m")
+                ml_result = model.predict(df_5m, timeframe="5m",
+                                          sentiment_score=s_score,
+                                          sentiment_momentum=s_momentum)
             elif model and df_1h is not None and not df_1h.empty:
-                ml_result = model.predict(df_1h, timeframe="1h")
+                ml_result = model.predict(df_1h, timeframe="1h",
+                                          sentiment_score=s_score,
+                                          sentiment_momentum=s_momentum)
             else:
                 ml_result = {"buy_prob": None, "sell_prob": None, "ai_signal": None}
 
@@ -766,17 +803,12 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
             if get_last_signal_action(symbol, within_hours=6) == sig["action"]:
                 continue
 
-            # Sentiment filter — suppress if news strongly contradicts signal
-            sentiment = get_sentiment(symbol)
-            if should_suppress(sig["action"], sentiment):
-                logger.info(
-                    f"[sentiment] suppressed {sig['action']} {symbol} "
-                    f"(sentiment={sentiment['label']} score={sentiment['score']:.2f})"
-                )
-                continue
+            # Sentiment is now a soft ML probability adjustment (applied in predict()),
+            # not a hard gate. Append score to reasons for transparency when non-neutral.
             if sentiment.get("label") not in ("neutral", None) and sentiment.get("source") not in ("disabled", "cache_miss"):
+                momentum_str = f", Δ{s_momentum:+.2f}" if abs(s_momentum) > 0.05 else ""
                 sig.setdefault("reasons", []).append(
-                    f"News sentiment: {sentiment['label']} ({sentiment['score']:+.2f})"
+                    f"News sentiment: {sentiment['label']} ({s_score:+.2f}{momentum_str})"
                 )
 
             # Suppress AI-only signals for symbols with poor bootstrap accuracy

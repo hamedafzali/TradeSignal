@@ -11,6 +11,7 @@ from database import (
     get_running_training_job, get_recent_training_jobs,
     get_all_settings, set_setting, get_all_sentiment_cache,
     set_symbol_market, get_accuracy_by_direction, get_wf_results,
+    get_rolling_performance, get_equity_curve,
 )
 
 app = Flask(__name__)
@@ -236,6 +237,7 @@ _HTML = """<!DOCTYPE html>
     <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-overview">Overview</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-ml">ML</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-activity">Learning</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-performance">Performance</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-admin">Admin</button></li>
   </ul>
 
@@ -559,6 +561,51 @@ _HTML = """<!DOCTYPE html>
       </div><!-- lt-log -->
 
     </div><!-- inner tab-content -->
+  </div>
+
+  <!-- ── PERFORMANCE TAB ───────────────────────────────────────────────── -->
+  <div class="tab-pane fade" id="tab-performance">
+    <div class="row g-3 mb-3">
+      <!-- Equity Curve -->
+      <div class="col-12">
+        <div class="card p-3">
+          <div class="d-flex align-items-center justify-content-between mb-2">
+            <h6 class="mb-0">📈 Simulated Equity Curve <small class="text-muted">($1,000 per signal)</small></h6>
+            <div id="eq-summary" class="text-muted small"></div>
+          </div>
+          <canvas id="equityChart" height="90"></canvas>
+        </div>
+      </div>
+      <!-- Rolling Win Rate -->
+      <div class="col-12">
+        <div class="card p-3">
+          <h6 class="mb-2">📊 Rolling Win Rate (7-day &amp; 30-day)</h6>
+          <canvas id="wrChart" height="80"></canvas>
+        </div>
+      </div>
+    </div>
+    <div class="row g-3">
+      <!-- By signal strength -->
+      <div class="col-md-6">
+        <div class="card p-3">
+          <h6 class="mb-2">By Signal Strength (last 30 days)</h6>
+          <table class="table table-sm mb-0" id="strengthTable">
+            <thead><tr><th>Strength</th><th>Total</th><th>Correct</th><th>Win Rate</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <!-- By symbol -->
+      <div class="col-md-6">
+        <div class="card p-3">
+          <h6 class="mb-2">By Symbol (last 30 days)</h6>
+          <table class="table table-sm mb-0" id="symPerfTable">
+            <thead><tr><th>Symbol</th><th>Total</th><th>Correct</th><th>Win Rate</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- ── ADMIN TAB ─────────────────────────────────────────────────────── -->
@@ -1756,6 +1803,159 @@ document.querySelectorAll('[data-bs-target="#lt-analytics"]').forEach(el =>
 document.querySelectorAll('[data-bs-target="#tab-admin"]').forEach(el =>
   el.addEventListener('shown.bs.tab', () => { refreshAdmin(); loadSettings(); })
 );
+document.querySelectorAll('[data-bs-target="#tab-performance"]').forEach(el =>
+  el.addEventListener('shown.bs.tab', () => refreshPerformance())
+);
+
+// ── Performance tab ──────────────────────────────────────────────────────────
+let equityChartInst = null, wrChartInst = null;
+
+function wrColor(wr) {
+  if (wr >= 55) return '#4ade80';
+  if (wr >= 47) return '#facc15';
+  return '#f87171';
+}
+
+async function refreshPerformance() {
+  const [perf, eq] = await Promise.all([
+    fetch('/api/performance?days=90').then(r => r.json()),
+    fetch('/api/equity-curve?size=1000').then(r => r.json()),
+  ]);
+
+  // Equity curve
+  const eqLabels = eq.curve.map(p => p.date);
+  const eqValues = eq.curve.map(p => p.equity);
+  const ddValues = eq.curve.map(p => -p.drawdown_pct);
+
+  const eqCtx = document.getElementById('equityChart').getContext('2d');
+  if (equityChartInst) equityChartInst.destroy();
+  equityChartInst = new Chart(eqCtx, {
+    type: 'line',
+    data: {
+      labels: eqLabels,
+      datasets: [
+        {
+          label: 'P&L ($)',
+          data: eqValues,
+          borderColor: '#818cf8',
+          backgroundColor: 'rgba(129,140,248,0.08)',
+          fill: true,
+          tension: 0.3,
+          pointRadius: 0,
+          yAxisID: 'y',
+        },
+        {
+          label: 'Drawdown (%)',
+          data: ddValues,
+          borderColor: '#f87171',
+          backgroundColor: 'rgba(248,113,113,0.06)',
+          fill: true,
+          tension: 0.3,
+          pointRadius: 0,
+          yAxisID: 'y2',
+        },
+      ]
+    },
+    options: {
+      responsive: true,
+      interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { labels: { color: '#94a3b8', boxWidth: 12 } } },
+      scales: {
+        x: { ticks: { color: '#64748b', maxTicksLimit: 10 }, grid: { color: '#1e293b' } },
+        y: { ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' }, title: { display: true, text: 'P&L ($)', color: '#64748b' } },
+        y2: { position: 'right', ticks: { color: '#f87171' }, grid: { drawOnChartArea: false }, title: { display: true, text: 'Drawdown (%)', color: '#f87171' } },
+      }
+    }
+  });
+
+  const sign = eq.current >= 0 ? '+' : '';
+  const ddCls = eq.max_drawdown_pct >= 5 ? 'text-danger' : 'text-success';
+  document.getElementById('eq-summary').innerHTML =
+    `P&L: <strong>${sign}$${eq.current.toFixed(0)}</strong> &nbsp;|&nbsp; ` +
+    `Trades: ${eq.total_trades} &nbsp;|&nbsp; ` +
+    `WR: ${eq.win_rate}% &nbsp;|&nbsp; ` +
+    `<span class="${ddCls}">Max DD: ${eq.max_drawdown_pct.toFixed(1)}%</span>`;
+
+  // Rolling win rate chart
+  const daily = perf.daily;
+  const wrCtx = document.getElementById('wrChart').getContext('2d');
+  if (wrChartInst) wrChartInst.destroy();
+  wrChartInst = new Chart(wrCtx, {
+    type: 'line',
+    data: {
+      labels: daily.map(d => d.date),
+      datasets: [
+        {
+          label: '7-day WR',
+          data: daily.map(d => d.win_rate_7d),
+          borderColor: '#818cf8',
+          tension: 0.3,
+          pointRadius: 0,
+          fill: false,
+        },
+        {
+          label: '30-day WR',
+          data: daily.map(d => d.win_rate_30d),
+          borderColor: '#34d399',
+          tension: 0.3,
+          pointRadius: 0,
+          borderDash: [4, 3],
+          fill: false,
+        },
+      ]
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { labels: { color: '#94a3b8', boxWidth: 12 } },
+        annotation: {
+          annotations: {
+            breakeven: {
+              type: 'line', yMin: 37.5, yMax: 37.5,
+              borderColor: 'rgba(248,113,113,0.5)', borderWidth: 1,
+              borderDash: [4, 4],
+              label: { content: 'breakeven', enabled: true, color: '#f87171', font: { size: 9 } }
+            }
+          }
+        }
+      },
+      scales: {
+        x: { ticks: { color: '#64748b', maxTicksLimit: 10 }, grid: { color: '#1e293b' } },
+        y: { min: 0, max: 100, ticks: { color: '#94a3b8', callback: v => v+'%' }, grid: { color: '#1e293b' } }
+      }
+    }
+  });
+
+  // By strength table
+  const stBody = document.querySelector('#strengthTable tbody');
+  stBody.innerHTML = '';
+  const strOrder = ['STRONG', 'RULE', 'AI'];
+  strOrder.forEach(s => {
+    const d = (perf.by_strength || {})[s];
+    if (!d) return;
+    const wr = d.win_rate;
+    stBody.innerHTML += `<tr>
+      <td><span class="badge" style="background:${s==='STRONG'?'#4ade80':s==='RULE'?'#818cf8':'#f59e0b'};color:#0f172a">${s}</span></td>
+      <td>${d.total}</td><td>${d.correct}</td>
+      <td><strong style="color:${wrColor(wr)}">${wr}%</strong></td>
+    </tr>`;
+  });
+  if (!stBody.innerHTML) stBody.innerHTML = '<tr><td colspan="4" class="text-muted text-center">No resolved signals yet</td></tr>';
+
+  // By symbol table
+  const symBody = document.querySelector('#symPerfTable tbody');
+  symBody.innerHTML = '';
+  const syms = Object.entries(perf.by_symbol || {}).sort((a, b) => b[1].total - a[1].total);
+  syms.forEach(([sym, d]) => {
+    const wr = d.win_rate;
+    symBody.innerHTML += `<tr>
+      <td><strong>${sym}</strong></td>
+      <td>${d.total}</td><td>${d.correct}</td>
+      <td><strong style="color:${wrColor(wr)}">${wr}%</strong></td>
+    </tr>`;
+  });
+  if (!symBody.innerHTML) symBody.innerHTML = '<tr><td colspan="4" class="text-muted text-center">No data yet</td></tr>';
+}
 </script>
 </body>
 </html>
@@ -1934,6 +2134,18 @@ def api_accuracy_direction():
 @app.route("/api/wf-results")
 def api_wf_results():
     return jsonify(get_wf_results())
+
+
+@app.route("/api/performance")
+def api_performance():
+    days = int(request.args.get("days", 30))
+    return jsonify(get_rolling_performance(days=days))
+
+
+@app.route("/api/equity-curve")
+def api_equity_curve():
+    trade_size = float(request.args.get("size", 1000))
+    return jsonify(get_equity_curve(trade_size=trade_size))
 
 
 @app.route("/api/symbols/<symbol>/market", methods=["POST"])
