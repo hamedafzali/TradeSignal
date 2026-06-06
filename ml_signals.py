@@ -409,6 +409,16 @@ class StockModel:
             logger.info(f"[ML] {self.symbol} 1h top features: " +
                         " | ".join(f"{n}={v:.3f}" for n, v in top5))
 
+            # Store training quantile boundaries per feature for PSI drift detection.
+            # PSI compares current feature distributions against these training baselines.
+            try:
+                self._train_quantiles = {
+                    col: np.nanpercentile(X_main_raw[:, i], np.linspace(0, 100, 11))
+                    for i, col in enumerate(self.feature_cols)
+                }
+            except Exception:
+                self._train_quantiles = {}
+
             try:
                 self.cal_buy = CalibratedClassifierCV(self.clf_buy, method="sigmoid", cv="prefit")
                 self.cal_buy.fit(X_cal, yb_cal)
@@ -666,3 +676,44 @@ class StockModel:
         except Exception as e:
             logger.error(f"[ML] Predict error for {self.symbol}: {e}")
             return default
+
+    def compute_psi(self, df: pd.DataFrame,
+                    spy_df: "pd.DataFrame | None" = None,
+                    vix_df: "pd.DataFrame | None" = None,
+                    psi_threshold: float = 0.20) -> dict:
+        """
+        Population Stability Index for feature drift detection.
+        Compares current df feature distributions against training quantile baselines.
+        PSI < 0.10: no drift  |  0.10–0.20: minor  |  > 0.20: significant drift
+
+        Returns {"psi": {feature: psi_value}, "drifted": [features_above_threshold]}.
+        """
+        result = {"psi": {}, "drifted": []}
+        if not getattr(self, "_train_quantiles", {}):
+            return result
+        try:
+            feat_df = build_features(df, spy_df=spy_df, vix_df=vix_df).dropna()
+            if feat_df.empty:
+                return result
+            n_bins = 10
+            for col, q_edges in self._train_quantiles.items():
+                if col not in feat_df.columns:
+                    continue
+                live_vals = feat_df[col].dropna().values
+                if len(live_vals) < 20:
+                    continue
+                # Bin live distribution against training quantile edges
+                train_edges = np.unique(q_edges)
+                train_counts = np.histogram(live_vals, bins=train_edges)[0]
+                # Expected: uniform in each training decile (by construction of quantiles)
+                expected_pct = np.ones(len(train_counts)) / len(train_counts)
+                actual_pct   = train_counts / (train_counts.sum() + 1e-9)
+                # PSI computation with small epsilon to avoid log(0)
+                psi_val = float(np.sum((actual_pct - expected_pct) *
+                                       np.log((actual_pct + 1e-6) / (expected_pct + 1e-6))))
+                result["psi"][col] = round(psi_val, 4)
+                if psi_val > psi_threshold:
+                    result["drifted"].append(col)
+        except Exception as e:
+            logger.debug(f"[ML] PSI error for {self.symbol}: {e}")
+        return result

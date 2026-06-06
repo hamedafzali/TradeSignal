@@ -219,6 +219,44 @@ def _is_ai_capable(symbol: str) -> bool:
 
 # ── Regime filter ─────────────────────────────────────────────────────────────
 
+def get_market_regime(spy_df: "pd.DataFrame | None" = None,
+                      vix_df: "pd.DataFrame | None" = None) -> str:
+    """
+    3-state market regime: 'bull' | 'bear' | 'volatile'.
+    bull:     SPY above EMA50 AND VIX < 20
+    volatile: VIX ≥ 20 OR VIX 2-day spike > 20%
+    bear:     SPY below EMA50 (while not volatile)
+    """
+    try:
+        if spy_df is None or vix_df is None:
+            spy_df, vix_df = get_predict_market_context()
+    except Exception:
+        return "unknown"
+    try:
+        spy_c = spy_df["Close"].squeeze()
+        spy_ema50 = spy_c.ewm(span=50, adjust=False).mean()
+        spy_above_ema = float(spy_c.iloc[-1]) >= float(spy_ema50.iloc[-1])
+    except Exception:
+        spy_above_ema = True
+
+    try:
+        vix_c = vix_df["Close"].squeeze()
+        current_vix = float(vix_c.iloc[-1])
+        prior_vix   = float(vix_c.iloc[-3]) if len(vix_c) >= 3 else current_vix
+        vix_high    = current_vix >= 20
+        vix_spike   = prior_vix > 0 and (current_vix - prior_vix) / prior_vix > 0.20
+    except Exception:
+        current_vix = 15.0
+        vix_high = False
+        vix_spike = False
+
+    if vix_high or vix_spike:
+        return "volatile"
+    if spy_above_ema:
+        return "bull"
+    return "bear"
+
+
 def _is_hostile_regime(spy_df: "pd.DataFrame | None", vix_df: "pd.DataFrame | None",
                        symbol_df_1h: "pd.DataFrame | None") -> tuple[bool, str]:
     """
@@ -490,6 +528,41 @@ async def refresh_sentiment_cache(context: ContextTypes.DEFAULT_TYPE) -> None:
             refresh_sentiment(symbol)
         except Exception as e:
             logger.debug(f"[sentiment] refresh failed for {symbol}: {e}")
+
+
+async def drift_detection_check(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Nightly PSI drift check. Compares current 5m feature distributions against
+    training baselines stored in each model. Logs a WARNING for features with
+    PSI > 0.20 (significant distribution shift) and flags the symbol for retraining
+    attention. Does not retrain automatically — drift is an alert, not a trigger.
+    """
+    symbols = _get_symbols()
+    spy_df, vix_df = get_predict_market_context()
+    for symbol in symbols:
+        model = models.get(symbol)
+        if model is None or not model.trained:
+            continue
+        try:
+            df = yf.download(symbol, period="2d", interval="5m",
+                             progress=False, auto_adjust=True)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(1)
+            if len(df) < 50:
+                continue
+            result = model.compute_psi(df, spy_df=spy_df, vix_df=vix_df)
+            drifted = result.get("drifted", [])
+            if drifted:
+                psi_str = ", ".join(
+                    f"{f}={result['psi'][f]:.3f}" for f in drifted
+                )
+                logger.warning(
+                    f"[drift] {symbol}: significant feature drift detected — {psi_str}"
+                )
+            else:
+                logger.debug(f"[drift] {symbol}: no significant drift")
+        except Exception as e:
+            logger.debug(f"[drift] {symbol} check failed: {e}")
 
 
 async def continuous_learning(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -822,6 +895,9 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
             if hostile:
                 logger.info(f"[regime] suppressed {sig['action']} {symbol}: {regime_reason}")
                 continue
+
+            # Tag signal with current 3-state regime before persisting
+            sig["regime"] = get_market_regime(spy_df_ctx, vix_df_ctx)
 
             # Concurrent direction limit: max 3 same-direction signals per scan cycle.
             # Prevents correlated position accumulation (e.g. 8 tech stocks all BUY).
@@ -1822,6 +1898,9 @@ def main() -> None:
     # Weekly recap: every Monday at 9:00 UTC
     app.job_queue.run_daily(weekly_recap, time=datetime.strptime("09:00", "%H:%M").time(),
                             days=(0,))  # 0 = Monday
+    # Nightly PSI drift detection: 02:00 UTC daily
+    app.job_queue.run_daily(drift_detection_check,
+                            time=datetime.strptime("02:00", "%H:%M").time())
 
     logger.info(f"Bot @{BOT_USERNAME} started — channel: {CHANNEL_ID}")
     app.run_polling()

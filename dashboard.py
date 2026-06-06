@@ -11,7 +11,7 @@ from database import (
     get_running_training_job, get_recent_training_jobs,
     get_all_settings, set_setting, get_all_sentiment_cache,
     set_symbol_market, get_accuracy_by_direction, get_wf_results,
-    get_rolling_performance, get_equity_curve,
+    get_rolling_performance, get_equity_curve, get_regime_attribution,
 )
 
 app = Flask(__name__)
@@ -271,6 +271,13 @@ _HTML = """<!DOCTYPE html>
       <div class="col-6 col-md-3"><div class="card p-2 px-3"><div class="card-title mb-1">Today</div><div class="stat-val" id="s-today">—</div></div></div>
       <div class="col-6 col-md-3"><div class="card p-2 px-3"><div class="card-title mb-1">Accuracy</div><div class="stat-val" id="s-acc">—</div></div></div>
       <div class="col-6 col-md-3"><div class="card p-2 px-3"><div class="card-title mb-1">Users</div><div class="stat-val" id="s-users">—</div></div></div>
+    </div>
+    <!-- Regime badge + attribution -->
+    <div class="card mb-2 p-2 px-3 d-flex flex-row align-items-center gap-3 flex-wrap" style="font-size:.8rem">
+      <span style="color:var(--muted)">Market Regime:</span>
+      <span id="regime-badge" class="badge fs-6 px-3 py-1">—</span>
+      <span style="color:var(--dim)">·</span>
+      <span id="regime-attribution" style="color:var(--muted)"></span>
     </div>
 
     <div class="row g-2 mb-2">
@@ -950,10 +957,27 @@ function updateMarketStatus() {
 
 // ── Overview ──────────────────────────────────────────────────────────────────
 async function refreshOverview() {
-  const [stats, signals] = await Promise.all([
+  const [stats, signals, regimeData] = await Promise.all([
     fetch('/api/stats').then(r=>r.json()),
     fetch('/api/signals').then(r=>r.json()),
+    fetch('/api/regime').then(r=>r.json()).catch(()=>({regime:'unknown',attribution:[]})),
   ]);
+
+  // Regime badge
+  const regimeBadge = document.getElementById('regime-badge');
+  const regimeColors = {bull:'bg-success', bear:'bg-danger', volatile:'bg-warning text-dark', unknown:'bg-secondary'};
+  const regimeIcons  = {bull:'↑', bear:'↓', volatile:'~', unknown:'?'};
+  if (regimeBadge) {
+    const r = regimeData.regime || 'unknown';
+    regimeBadge.className = 'badge fs-6 px-3 py-1 ' + (regimeColors[r]||'bg-secondary');
+    regimeBadge.textContent = (regimeIcons[r]||'') + ' ' + r.toUpperCase();
+  }
+  const regimeAttr = document.getElementById('regime-attribution');
+  if (regimeAttr && regimeData.attribution && regimeData.attribution.length > 0) {
+    regimeAttr.textContent = regimeData.attribution.map(
+      a => `${a.regime}: ${a.win_rate}% WR (${a.total} trades)`
+    ).join('  ·  ');
+  }
 
   document.getElementById('s-users').textContent = stats.total_users;
   document.getElementById('s-total').textContent = stats.total_signals;
@@ -2146,6 +2170,19 @@ def api_performance():
 def api_equity_curve():
     trade_size = float(request.args.get("size", 1000))
     return jsonify(get_equity_curve(trade_size=trade_size))
+
+
+@app.route("/api/regime")
+def api_regime():
+    try:
+        from bot import get_market_regime
+        from ml_signals import get_predict_market_context
+        spy_df, vix_df = get_predict_market_context()
+        regime = get_market_regime(spy_df, vix_df)
+    except Exception:
+        regime = "unknown"
+    attribution = get_regime_attribution(days=90)
+    return jsonify({"regime": regime, "attribution": attribution})
 
 
 @app.route("/api/symbols/<symbol>/market", methods=["POST"])

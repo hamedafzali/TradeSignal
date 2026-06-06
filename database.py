@@ -184,6 +184,7 @@ def init_db() -> None:
             "max_favorable_pct": "REAL",
             "max_adverse_pct": "REAL",
             "suggested_size_pct": "REAL",
+            "regime": "TEXT DEFAULT 'unknown'",
         }
         for col, sql_type in signal_migrations.items():
             if col not in signal_cols:
@@ -232,8 +233,8 @@ def log_signal(sig: dict, features: dict | None = None) -> int:
             INSERT INTO signals
                 (symbol, action, strength, price, tp, sl, tp_pct, sl_pct, rr,
                  rsi, trend, quality, ai_confidence, vol_spike, reasons, features,
-                 sent_at, suggested_size_pct)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 sent_at, suggested_size_pct, regime)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             sig["symbol"], sig["action"], sig.get("strength", "RULE"),
             sig.get("price"), sig.get("tp"), sig.get("sl"),
@@ -244,6 +245,7 @@ def log_signal(sig: dict, features: dict | None = None) -> int:
             json.dumps(features or {}),
             datetime.utcnow().isoformat(),
             sig.get("suggested_size_pct"),
+            sig.get("regime", "unknown"),
         ))
         return cur.lastrowid
 
@@ -1635,3 +1637,27 @@ def get_equity_curve(trade_size: float = 1000.0) -> dict:
         "total_trades": total,
         "win_rate": round(correct / total * 100, 1) if total else 0,
     }
+
+
+def get_regime_attribution(days: int = 90) -> list[dict]:
+    """Win rate and signal count per market regime over the last N days."""
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT regime,
+                   COUNT(*) as total,
+                   SUM(CASE WHEN outcome='correct' THEN 1 ELSE 0 END) as correct
+            FROM signals
+            WHERE sent_at >= ? AND outcome != 'pending' AND regime IS NOT NULL
+            GROUP BY regime
+            ORDER BY total DESC
+        """, (cutoff,)).fetchall()
+    return [
+        {
+            "regime": r["regime"],
+            "total": r["total"],
+            "correct": r["correct"],
+            "win_rate": round(r["correct"] / r["total"] * 100, 1) if r["total"] else 0,
+        }
+        for r in rows
+    ]
