@@ -19,9 +19,22 @@ RETRAIN_EVERY = int(os.getenv("RETRAIN_EVERY_SECONDS", "7200"))  # 2-hour fallba
 RETRAIN_OUTCOME_THRESHOLD = int(os.getenv("RETRAIN_OUTCOME_THRESHOLD", "25"))
 AI_SIGNAL_THRESHOLD = float(os.getenv("AI_SIGNAL_THRESHOLD", "0.65"))
 
+# ── Sector ETF map ───────────────────────────────────────────────────────────
+# Maps symbol → sector SPDR ETF for relative strength features.
+# Crypto and unlisted symbols map to None (feature gracefully absent).
+_SECTOR_MAP: dict[str, str | None] = {
+    "AAPL": "XLK", "MSFT": "XLK", "NVDA": "XLK", "TSLA": "XLK",
+    "GOOG": "XLK", "GOOGL": "XLK", "META": "XLK", "AMZN": "XLK",
+    "JPM": "XLF", "GS": "XLF", "BAC": "XLF", "WFC": "XLF", "MS": "XLF",
+    "XOM": "XLE", "CVX": "XLE", "COP": "XLE",
+    "JNJ": "XLV", "UNH": "XLV", "PFE": "XLV", "MRK": "XLV", "ABBV": "XLV",
+    "BTC-USD": None, "ETH-USD": None, "BNB-USD": None, "SOL-USD": None,
+}
+
 # ── Market context cache ──────────────────────────────────────────────────────
 _mkt_cache: dict = {"ts": 0.0, "spy": None, "vix": None}
 _MKT_TTL = 300  # seconds
+_sector_cache: dict[str, dict] = {}  # etf_ticker → {ts, df}
 
 
 def _get_market_ctx(period: str = "60d") -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
@@ -55,6 +68,27 @@ def get_predict_market_context() -> tuple[pd.DataFrame | None, pd.DataFrame | No
     return _get_market_ctx()
 
 
+def _get_sector_ctx(symbol: str, period: str = "60d") -> pd.DataFrame | None:
+    """Fetch the sector SPDR ETF for a symbol. Returns None for crypto/unknown."""
+    etf = _SECTOR_MAP.get(symbol.upper())
+    if etf is None:
+        return None
+    now = time.time()
+    cached = _sector_cache.get(etf)
+    if cached and now - cached["ts"] < _MKT_TTL:
+        return cached.get("df")
+    try:
+        df = yf.download(etf, period=period, interval="1h", progress=False, auto_adjust=True)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(1)
+        sector_df = df if not df.empty else None
+    except Exception as e:
+        logger.debug(f"[ML] Sector ETF {etf} fetch failed: {e}")
+        sector_df = None
+    _sector_cache[etf] = {"ts": now, "df": sector_df}
+    return sector_df
+
+
 def _align(series: pd.Series, target: pd.Index) -> pd.Series:
     """Reindex series to target using ffill, normalising timezones."""
     try:
@@ -73,7 +107,8 @@ def _align(series: pd.Series, target: pd.Index) -> pd.Series:
 
 def build_features(df: pd.DataFrame,
                    spy_df: pd.DataFrame | None = None,
-                   vix_df: pd.DataFrame | None = None) -> pd.DataFrame:
+                   vix_df: pd.DataFrame | None = None,
+                   sector_df: pd.DataFrame | None = None) -> pd.DataFrame:
     close  = df["Close"].squeeze()
     high   = df["High"].squeeze()
     low    = df["Low"].squeeze()
@@ -182,6 +217,17 @@ def build_features(df: pd.DataFrame,
             feat["vix_norm"] = vix_c / (vix_ma + 1e-9)
         except Exception as e:
             logger.debug(f"[ML] VIX feature error: {e}")
+
+    # ── Sector ETF relative strength (optional — absent for crypto) ───────────
+    # Compares symbol move vs its sector ETF to isolate stock-specific strength.
+    # Absent (column not added) when sector ETF is unknown/unavailable.
+    if sector_df is not None and not sector_df.empty:
+        try:
+            sec_c = _align(sector_df["Close"].squeeze(), feat.index)
+            feat["sector_rel_str_1h"] = close.pct_change(1) - sec_c.pct_change(1)
+            feat["sector_rel_str_8h"] = close.pct_change(8) - sec_c.pct_change(8)
+        except Exception as e:
+            logger.debug(f"[ML] Sector feature error: {e}")
 
     return feat
 
@@ -339,7 +385,8 @@ class StockModel:
                 return False
 
             spy_df, vix_df = _get_market_ctx()
-            features = build_features(df, spy_df=spy_df, vix_df=vix_df)
+            sector_df = _get_sector_ctx(self.symbol)
+            features = build_features(df, spy_df=spy_df, vix_df=vix_df, sector_df=sector_df)
 
             # TP/SL-aligned labels: train buy/sell classifiers independently
             # with objectives that exactly match live outcome resolution
@@ -408,6 +455,48 @@ class StockModel:
             top5 = sorted(zip(self.feature_cols, imp), key=lambda x: -x[1])[:5]
             logger.info(f"[ML] {self.symbol} 1h top features: " +
                         " | ".join(f"{n}={v:.3f}" for n, v in top5))
+
+            # ── Feature importance pruning: keep features >= 0.3× mean importance ──
+            # Drops noise features identified by the primary classifier.
+            # Re-trains on pruned set so the scaler and meta-classifiers are consistent.
+            try:
+                mean_imp = float(imp.mean())
+                active_mask = imp >= 0.3 * mean_imp
+                active_cols = [col for col, keep in zip(self.feature_cols, active_mask) if keep]
+                dropped = [col for col, keep in zip(self.feature_cols, active_mask) if not keep]
+                if len(active_cols) >= 10 and len(dropped) > 0:
+                    logger.info(f"[ML] {self.symbol} pruning {len(dropped)} low-importance features: {dropped}")
+                    # Re-subset X matrices and re-fit scaler + classifiers on pruned columns
+                    col_idx = [self.feature_cols.index(c) for c in active_cols]
+                    X_main_p = X_main_raw[:, col_idx]
+                    X_cal_p  = X_cal_raw[:, col_idx]
+                    pruned_scaler = StandardScaler()
+                    Xm_p = pruned_scaler.fit_transform(X_main_p)
+                    Xc_p = pruned_scaler.transform(X_cal_p)
+                    pruned_buy  = GradientBoostingClassifier(n_estimators=120, max_depth=3, learning_rate=0.05, random_state=42)
+                    pruned_sell = GradientBoostingClassifier(n_estimators=120, max_depth=3, learning_rate=0.05, random_state=42)
+                    sw_b_p = sw_buy_main[:len(Xm_p)]
+                    sw_s_p = sw_sell_main[:len(Xm_p)]
+                    pruned_buy.fit(Xm_p, yb_main, sample_weight=sw_b_p)
+                    pruned_sell.fit(Xm_p, ys_main, sample_weight=sw_s_p)
+                    # Replace model components with pruned versions
+                    self.feature_cols = active_cols
+                    self.scaler = pruned_scaler
+                    self.clf_buy  = pruned_buy
+                    self.clf_sell = pruned_sell
+                    # Re-calibrate on pruned calibration set
+                    try:
+                        self.cal_buy = CalibratedClassifierCV(pruned_buy, method="sigmoid", cv="prefit")
+                        self.cal_buy.fit(Xc_p, yb_cal)
+                        self.cal_sell = CalibratedClassifierCV(pruned_sell, method="sigmoid", cv="prefit")
+                        self.cal_sell.fit(Xc_p, ys_cal)
+                    except Exception:
+                        self.cal_buy = None; self.cal_sell = None
+                    # Update X_main_raw / X_cal_raw references for PSI quantile storage below
+                    X_main_raw = X_main_p
+                    X_cal = Xc_p
+            except Exception as e:
+                logger.debug(f"[ML] Feature pruning skipped for {self.symbol}: {e}")
 
             # Store training quantile boundaries per feature for PSI drift detection.
             # PSI compares current feature distributions against these training baselines.
@@ -505,7 +594,8 @@ class StockModel:
                 return False
 
             spy_df, vix_df = _get_market_ctx()
-            features = build_features(df, spy_df=spy_df, vix_df=vix_df)
+            sector_df = _get_sector_ctx(self.symbol)
+            features = build_features(df, spy_df=spy_df, vix_df=vix_df, sector_df=sector_df)
 
             # Use the same TP/SL label logic — outcome_bars=24 means 24×5m = 2h horizon
             y_buy_raw, y_sell_raw = build_labels_tpsl(
@@ -623,7 +713,8 @@ class StockModel:
 
         try:
             spy_df, vix_df = _get_market_ctx()
-            features = build_features(df, spy_df=spy_df, vix_df=vix_df)
+            sector_df = _get_sector_ctx(self.symbol)
+            features = build_features(df, spy_df=spy_df, vix_df=vix_df, sector_df=sector_df)
 
             available_cols = [c for c in feature_cols if c in features.columns]
             if len(available_cols) < len(feature_cols):
