@@ -180,7 +180,8 @@ def _vol_sufficient(df: pd.DataFrame) -> bool:
 
 
 def _quality_score(rule_hits: int, ai_confidence: float | None,
-                   trend: str, action: str, vol_spike: bool) -> int:
+                   trend: str, action: str, vol_spike: bool,
+                   meta_confidence: float | None = None) -> int:
     score = rule_hits  # 0–3
     if ai_confidence and ai_confidence > 0.60:
         score += 1
@@ -188,11 +189,14 @@ def _quality_score(rule_hits: int, ai_confidence: float | None,
         score += 1
     if vol_spike:
         score += 1
-    return max(1, min(score, 5))
+    # Meta-classifier bonus: when secondary model confirms primary correctness
+    if meta_confidence is not None and meta_confidence > 0.60:
+        score += 1
+    return max(1, min(score, 6))
 
 
 def _stars(score: int) -> str:
-    return "⭐" * score + "☆" * (5 - score)
+    return "⭐" * score + "☆" * max(0, 6 - score)
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
@@ -477,6 +481,8 @@ def combine_signals(rule_sig: dict | None, ml_result: dict,
     ai_signal = ml_result.get("ai_signal")
     buy_prob = ml_result.get("buy_prob")
     sell_prob = ml_result.get("sell_prob")
+    meta_conf_buy  = ml_result.get("meta_conf_buy")
+    meta_conf_sell = ml_result.get("meta_conf_sell")
     rule_action = rule_sig["action"] if rule_sig else None
 
     sig = None
@@ -485,10 +491,13 @@ def combine_signals(rule_sig: dict | None, ml_result: dict,
         sig = dict(rule_sig)
         sig["strength"] = "STRONG"
         sig["ai_confidence"] = buy_prob if rule_action == "BUY" else sell_prob
+        # Attach meta-confidence so downstream can use it for quality scoring
+        sig["meta_confidence"] = (meta_conf_buy if rule_action == "BUY" else meta_conf_sell)
     elif rule_action:
         sig = dict(rule_sig)
         sig["strength"] = "RULE"
         sig["ai_confidence"] = buy_prob if rule_action == "BUY" else sell_prob
+        sig["meta_confidence"] = (meta_conf_buy if rule_action == "BUY" else meta_conf_sell)
     elif ai_signal:
         prob = buy_prob if ai_signal == "BUY" else sell_prob
         if prob is not None and prob >= 0.70:
@@ -538,6 +547,7 @@ def combine_signals(rule_sig: dict | None, ml_result: dict,
                 "strength": "AI", "ai_confidence": prob, "quality": 0,
                 "sl_mult": round(sl_mult, 2), "tp_mult": round(tp_mult, 2),
                 "suggested_size_pct": _kelly_size(ai_wr, rr),
+                "meta_confidence": (meta_conf_buy if ai_signal == "BUY" else meta_conf_sell),
             }
 
     if sig is None:
@@ -579,6 +589,7 @@ def combine_signals(rule_sig: dict | None, ml_result: dict,
         sig.get("trend", "unknown"),
         sig["action"],
         sig.get("vol_spike", False),
+        meta_confidence=sig.get("meta_confidence"),
     )
     sig["stars"] = _stars(sig["quality"])
 

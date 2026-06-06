@@ -284,6 +284,17 @@ class StockModel:
         self.feature_cols_5m: list[str] = []
         self.trained_5m       = False
 
+        # ── Meta-labeling classifiers (Phase 6) ──────────────────────────────
+        # Secondary classifiers trained to predict "is the primary classifier
+        # correct?" — trained on calibration data with primary_prob appended as
+        # an extra feature. Separates direction from confidence quality.
+        self.clf_meta_buy:    GradientBoostingClassifier | None = None
+        self.clf_meta_sell:   GradientBoostingClassifier | None = None
+        self.clf_meta_buy_5m:  GradientBoostingClassifier | None = None
+        self.clf_meta_sell_5m: GradientBoostingClassifier | None = None
+        self.trained_meta    = False
+        self.trained_meta_5m = False
+
         self.trained_at   = 0.0
         self.train_samples    = 0
         self.outcome_samples  = 0
@@ -408,6 +419,33 @@ class StockModel:
                 self.cal_buy = None
                 self.cal_sell = None
 
+            # ── Meta-labeling: train on calibration set (never seen by primary) ──
+            # meta_label_buy[i] = 1 when primary predicted BUY and it was correct
+            # Features: original X_cal + primary_prob (the "skill" signal)
+            try:
+                buy_clf_for_meta  = self.cal_buy  if self.cal_buy  is not None else self.clf_buy
+                sell_clf_for_meta = self.cal_sell if self.cal_sell is not None else self.clf_sell
+                p_buy_cal  = buy_clf_for_meta.predict_proba(X_cal)[:, 1]
+                p_sell_cal = sell_clf_for_meta.predict_proba(X_cal)[:, 1]
+                meta_buy_label  = ((p_buy_cal  > 0.5) & (yb_cal == 1)).astype(int)
+                meta_sell_label = ((p_sell_cal > 0.5) & (ys_cal == 1)).astype(int)
+                X_meta_buy  = np.hstack([X_cal, p_buy_cal.reshape(-1, 1)])
+                X_meta_sell = np.hstack([X_cal, p_sell_cal.reshape(-1, 1)])
+                if meta_buy_label.sum() >= 5 and len(np.unique(meta_buy_label)) > 1:
+                    self.clf_meta_buy = GradientBoostingClassifier(
+                        n_estimators=80, max_depth=2, learning_rate=0.08, random_state=42)
+                    self.clf_meta_buy.fit(X_meta_buy, meta_buy_label)
+                if meta_sell_label.sum() >= 5 and len(np.unique(meta_sell_label)) > 1:
+                    self.clf_meta_sell = GradientBoostingClassifier(
+                        n_estimators=80, max_depth=2, learning_rate=0.08, random_state=42)
+                    self.clf_meta_sell.fit(X_meta_sell, meta_sell_label)
+                self.trained_meta = True
+                logger.info(f"[ML] {self.symbol} 1h meta-classifiers trained "
+                            f"(buy pos={meta_buy_label.sum()}, sell pos={meta_sell_label.sum()})")
+            except Exception as e:
+                logger.debug(f"[ML] Meta-label training skipped for {self.symbol}: {e}")
+                self.trained_meta = False
+
             self.trained = True
             self.trained_at = time.time()
             self.train_samples = len(X)
@@ -505,6 +543,29 @@ class StockModel:
                 self.cal_buy_5m  = None
                 self.cal_sell_5m = None
 
+            # ── 5m Meta-labeling ─────────────────────────────────────────────
+            try:
+                buy_clf_m  = self.cal_buy_5m  if self.cal_buy_5m  is not None else self.clf_buy_5m
+                sell_clf_m = self.cal_sell_5m if self.cal_sell_5m is not None else self.clf_sell_5m
+                p_b5  = buy_clf_m.predict_proba(X_cal)[:, 1]
+                p_s5  = sell_clf_m.predict_proba(X_cal)[:, 1]
+                mb5 = ((p_b5 > 0.5) & (yb_cal == 1)).astype(int)
+                ms5 = ((p_s5 > 0.5) & (ys_cal == 1)).astype(int)
+                Xmb5 = np.hstack([X_cal, p_b5.reshape(-1, 1)])
+                Xms5 = np.hstack([X_cal, p_s5.reshape(-1, 1)])
+                if mb5.sum() >= 5 and len(np.unique(mb5)) > 1:
+                    self.clf_meta_buy_5m = GradientBoostingClassifier(
+                        n_estimators=80, max_depth=2, learning_rate=0.08, random_state=42)
+                    self.clf_meta_buy_5m.fit(Xmb5, mb5)
+                if ms5.sum() >= 5 and len(np.unique(ms5)) > 1:
+                    self.clf_meta_sell_5m = GradientBoostingClassifier(
+                        n_estimators=80, max_depth=2, learning_rate=0.08, random_state=42)
+                    self.clf_meta_sell_5m.fit(Xms5, ms5)
+                self.trained_meta_5m = True
+            except Exception as e:
+                logger.debug(f"[ML] 5m meta-label training skipped for {self.symbol}: {e}")
+                self.trained_meta_5m = False
+
             self.trained_5m = True
             self._save()
             logger.info(f"[ML] {self.symbol} 5m model trained on {len(X)} samples")
@@ -547,6 +608,9 @@ class StockModel:
         if not trained_ok or not feature_cols:
             return default
 
+        meta_buy_clf  = (self.clf_meta_buy_5m  if use_5m else self.clf_meta_buy)
+        meta_sell_clf = (self.clf_meta_sell_5m if use_5m else self.clf_meta_sell)
+
         try:
             spy_df, vix_df = _get_market_ctx()
             features = build_features(df, spy_df=spy_df, vix_df=vix_df)
@@ -575,6 +639,19 @@ class StockModel:
                 buy_prob  = float(np.clip(buy_prob  * (1.0 + sentiment_adj), 0.01, 0.99))
                 sell_prob = float(np.clip(sell_prob * (1.0 - sentiment_adj), 0.01, 0.99))
 
+            # ── Meta-classifier: "is the primary likely correct?" ────────────
+            meta_conf_buy  = None
+            meta_conf_sell = None
+            try:
+                if meta_buy_clf is not None:
+                    X_meta_buy  = np.hstack([row.values, [[buy_prob]]])
+                    meta_conf_buy  = float(meta_buy_clf.predict_proba(X_meta_buy)[0][1])
+                if meta_sell_clf is not None:
+                    X_meta_sell = np.hstack([row.values, [[sell_prob]]])
+                    meta_conf_sell = float(meta_sell_clf.predict_proba(X_meta_sell)[0][1])
+            except Exception as e:
+                logger.debug(f"[ML] Meta predict error for {self.symbol}: {e}")
+
             _GAP = 0.10
             ai_signal = None
             if buy_prob > AI_SIGNAL_THRESHOLD and buy_prob > sell_prob + _GAP:
@@ -582,7 +659,10 @@ class StockModel:
             elif sell_prob > AI_SIGNAL_THRESHOLD and sell_prob > buy_prob + _GAP:
                 ai_signal = "SELL"
 
-            return {"buy_prob": buy_prob, "sell_prob": sell_prob, "ai_signal": ai_signal}
+            return {
+                "buy_prob": buy_prob, "sell_prob": sell_prob, "ai_signal": ai_signal,
+                "meta_conf_buy": meta_conf_buy, "meta_conf_sell": meta_conf_sell,
+            }
         except Exception as e:
             logger.error(f"[ML] Predict error for {self.symbol}: {e}")
             return default
