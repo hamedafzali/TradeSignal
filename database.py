@@ -749,9 +749,12 @@ def set_user_pref(chat_id: str | int, lang: str | None = None, mode: str | None 
 # ── Symbol management ─────────────────────────────────────────────────────────
 
 def seed_symbols(symbols: list[str]) -> None:
-    """Insert symbols from env on first run — skip if already in DB."""
+    """Insert symbols from env only on the very first run (empty table)."""
     now = datetime.utcnow().isoformat()
     with _conn() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+        if count > 0:
+            return  # already configured — never override user's symbol choices
         for sym in symbols:
             conn.execute("""
                 INSERT OR IGNORE INTO symbols (symbol, active, added_at, added_by)

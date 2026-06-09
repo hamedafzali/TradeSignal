@@ -19,8 +19,9 @@ _XETRA_CLOSE = time(17, 30)
 _CRYPTO_SYMBOLS = {"BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD",
                    "ADA-USD", "DOGE-USD", "AVAX-USD", "MATIC-USD", "DOT-USD"}
 
-# Suffixes that indicate a European-listed stock
-_XETRA_SUFFIXES = (".DE", ".F", ".XETRA", ".AS", ".PA", ".MI", ".BR", ".LS", ".MC")
+# Suffixes that indicate a European-listed stock (XETRA hours apply to all)
+_XETRA_SUFFIXES = (".DE", ".F", ".XETRA", ".AS", ".PA", ".MI", ".BR", ".LS", ".MC",
+                   ".SW", ".CO", ".ST", ".OL", ".HE", ".VI")
 
 
 def is_crypto(symbol: str) -> bool:
