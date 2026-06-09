@@ -29,20 +29,13 @@ def is_crypto(symbol: str) -> bool:
 
 
 def detect_market(symbol: str) -> str:
-    """Auto-detect market from symbol. Falls back to configured default_market setting."""
+    """Auto-detect market from symbol suffix — crypto, xetra (European), or us."""
     s = symbol.upper()
     if is_crypto(s):
         return "crypto"
     for suffix in _XETRA_SUFFIXES:
         if s.endswith(suffix.upper()):
             return "xetra"
-    try:
-        from database import get_setting
-        default = get_setting("default_market", "us")
-        if default in ("us", "xetra"):
-            return default
-    except Exception:
-        pass
     return "us"
 
 

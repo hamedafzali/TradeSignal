@@ -729,14 +729,6 @@ _HTML = """<!DOCTYPE html>
               <div class="small mt-1 text-muted">Price, TP and SL in Telegram signals will be shown in this currency</div>
             </div>
 
-            <div class="col-md-4">
-              <label class="small text-muted">Default Market</label>
-              <select id="set-default_market" class="form-control mt-1">
-                <option value="us">🇺🇸 US — NYSE / NASDAQ (09:30–16:00 ET)</option>
-                <option value="xetra">🇩🇪 XETRA — Frankfurt / Trade Republic (09:00–17:30 CET)</option>
-              </select>
-              <div class="small mt-1 text-muted">Applies to symbols without an explicit market override. Switch to XETRA to use German trading hours.</div>
-            </div>
 
           </div>
           <div class="d-flex gap-3 align-items-center mt-3">
@@ -1229,7 +1221,7 @@ async function loadSettings() {
   const s = await fetch('/api/settings').then(r => r.json());
   const keys = ['sentiment_provider','news_provider','sentiment_suppress_threshold',
                  'finnhub_api_key','gemini_api_key','claude_api_key','sentiment_local_url','news_lookback_hours',
-                 'outcome_notify_admin','display_currency','default_market'];
+                 'outcome_notify_admin','display_currency'];
   for (const k of keys) {
     const el = document.getElementById('set-' + k);
     if (el && s[k] !== undefined) el.value = s[k];
@@ -1256,7 +1248,7 @@ async function saveSettings() {
   msg.textContent = 'Saving…';
   const keys = ['sentiment_provider','news_provider','sentiment_suppress_threshold',
                  'finnhub_api_key','gemini_api_key','claude_api_key','sentiment_local_url','news_lookback_hours',
-                 'outcome_notify_admin','display_currency','default_market'];
+                 'outcome_notify_admin','display_currency'];
   const payload = {};
   for (const k of keys) {
     const el = document.getElementById('set-' + k);
@@ -1312,19 +1304,14 @@ async function refreshAdmin() {
       ? `<button class="btn btn-del" style="background:#1a140a;color:#fbbf24;border-color:#fbbf2430" onclick="removeSymbol('${s.symbol}')" title="Deactivate">Deactivate</button>`
       : `<button class="btn btn-add" style="font-size:.72rem;padding:2px 10px" onclick="restoreSymbol('${s.symbol}')" title="Activate">Activate</button>`;
     const delBtn = `<button class="btn btn-del" onclick="hardDeleteSymbol('${s.symbol}')" title="Permanently delete">✕ Delete</button>`;
-    const mkt = s.market || 'auto';
-    const marketSel = s.active ? `<select class="form-control" style="max-width:125px;font-size:.75rem;padding:2px 6px"
-        onchange="setSymbolMarket('${s.symbol}', this.value)">
-        <option value="" ${mkt==='auto'?'selected':''}>🔍 Auto</option>
-        <option value="us" ${mkt==='us'?'selected':''}>🇺🇸 US</option>
-        <option value="xetra" ${mkt==='xetra'?'selected':''}>🇩🇪 XETRA</option>
-        <option value="crypto" ${mkt==='crypto'?'selected':''}>₿ Crypto</option>
-      </select>` : '';
+    const mkt = s.market || 'us';
+    const mktLabel = {us:'🇺🇸 US', xetra:'🇩🇪 XETRA', crypto:'₿ Crypto'}[mkt] || mkt;
+    const marketBadge = `<span style="font-size:.70rem;color:var(--dim);border:1px solid var(--border);border-radius:4px;padding:1px 6px">${mktLabel}</span>`;
     const rowOpacity = s.active ? '' : 'opacity:.6;';
     return `<div class="d-flex align-items-center mb-2 p-2 gap-2" style="${rowOpacity}background:var(--bg);border:1px solid var(--border);border-radius:6px;flex-wrap:wrap">
       <span class="sym-tag">${s.symbol}</span>
       ${statusBadge}
-      ${marketSel}
+      ${marketBadge}
       <span class="ms-auto text-muted" style="font-size:.70rem">${s.added_at.slice(0,10)}</span>
       ${toggleBtn}
       ${delBtn}
@@ -1415,13 +1402,6 @@ async function restoreSymbol(sym) {
     body:JSON.stringify({symbol:sym}),
   }).then(r=>r.json());
   if (res.ok) refreshAdmin();
-}
-
-async function setSymbolMarket(sym, market) {
-  await fetch(`/api/symbols/${sym}/market`, {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({market: market || null}),
-  });
 }
 
 // ── Learning Activity ─────────────────────────────────────────────────────────
@@ -2095,7 +2075,7 @@ def api_settings_post():
         "sentiment_provider", "sentiment_local_url", "claude_api_key", "gemini_api_key",
         "sentiment_suppress_threshold", "news_provider", "finnhub_api_key",
         "outcome_notify_admin", "news_lookback_hours",
-        "display_currency", "default_market",
+        "display_currency",
     }
     for key, value in data.items():
         if key in allowed_keys:

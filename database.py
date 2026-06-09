@@ -771,9 +771,11 @@ def get_active_symbols() -> list[str]:
 
 
 def add_symbol(symbol: str, added_by: str = "admin") -> bool:
-    """Returns True if newly added, False if already exists."""
+    """Returns True if newly added (or re-activated), False if already active."""
     sym = symbol.upper()
     now = datetime.utcnow().isoformat()
+    from signals import detect_market
+    market = detect_market(sym)
     with _conn() as conn:
         existing = conn.execute(
             "SELECT active FROM symbols WHERE symbol = ?", (sym,)
@@ -781,14 +783,14 @@ def add_symbol(symbol: str, added_by: str = "admin") -> bool:
         if existing:
             if not existing["active"]:
                 conn.execute(
-                    "UPDATE symbols SET active = 1, added_at = ? WHERE symbol = ?",
-                    (now, sym)
+                    "UPDATE symbols SET active = 1, market = ?, added_at = ? WHERE symbol = ?",
+                    (market, now, sym)
                 )
                 return True
             return False
         conn.execute(
-            "INSERT INTO symbols (symbol, active, added_at, added_by) VALUES (?, 1, ?, ?)",
-            (sym, now, added_by)
+            "INSERT INTO symbols (symbol, active, market, added_at, added_by) VALUES (?, 1, ?, ?, ?)",
+            (sym, market, now, added_by)
         )
         return True
 
