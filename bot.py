@@ -1832,23 +1832,26 @@ async def post_init(app: Application) -> None:
     ])
 
     if ADMIN_CHAT_ID:
-        session = market_session()
-        labels = {"open": "🟢 Open", "pre": "🌅 Pre-market", "after": "🌙 After-hours", "closed": "⛔ Closed"}
-        crypto_syms = [s for s in SYMBOLS if is_crypto(s)]
-        stock_syms = [s for s in SYMBOLS if not is_crypto(s)]
+        active_syms = get_active_symbols()
+        crypto_syms = [s for s in active_syms if is_crypto(s)]
+        stock_syms  = [s for s in active_syms if not is_crypto(s)]
         watch_lines = []
         if stock_syms:
             watch_lines.append(f"Stocks: `{', '.join(stock_syms)}`")
         if crypto_syms:
             watch_lines.append(f"Crypto: `{', '.join(crypto_syms)}`")
+        # Show session for each unique market type among active symbols
+        labels = {"open": "🟢 Open", "pre": "🌅 Pre-market", "after": "🌙 After-hours", "closed": "⛔ Closed"}
+        sessions = {market_session(s) for s in active_syms}
+        session_str = " | ".join(labels.get(s, s) for s in sorted(sessions))
         await app.bot.send_message(
             chat_id=ADMIN_CHAT_ID,
             text=(
                 f"✅ *Bot live* @{BOT_USERNAME}\n"
                 f"Channel: `{CHANNEL_ID or 'not set'}`\n"
-                + "\n".join(watch_lines) + "\n"
-                f"Scan: every {SCAN_INTERVAL // 60} min\n"
-                f"Market: {labels.get(session, session)}"
+                + ("\n".join(watch_lines) + "\n" if watch_lines else "")
+                + f"Scan: every {SCAN_INTERVAL // 60} min\n"
+                f"Market: {session_str or '⛔ Closed'}"
             ),
             parse_mode="Markdown",
         )
