@@ -716,16 +716,19 @@ class StockModel:
             sector_df = _get_sector_ctx(self.symbol)
             features = build_features(df, spy_df=spy_df, vix_df=vix_df, sector_df=sector_df)
 
-            available_cols = [c for c in feature_cols if c in features.columns]
-            if len(available_cols) < len(feature_cols):
-                missing = set(feature_cols) - set(available_cols)
-                logger.debug(f"[ML] {self.symbol}: missing features at predict: {missing}")
+            missing_cols = [c for c in feature_cols if c not in features.columns]
+            if missing_cols:
+                logger.debug(f"[ML] {self.symbol}: missing features at predict (filled 0): {missing_cols}")
 
-            row = features[available_cols].dropna().iloc[-1:]
-            if row.empty:
+            # Build a full-width row aligned to feature_cols; fill missing with 0 (neutral).
+            last_idx = features.index[-1]
+            row_data = {col: (float(features[col].iloc[-1]) if col in features.columns and not pd.isna(features[col].iloc[-1]) else 0.0)
+                        for col in feature_cols}
+            row = pd.DataFrame([row_data], index=[last_idx])
+            if row.isnull().all(axis=None):
                 return default
 
-            X = scaler.transform(row.values)
+            X = scaler.transform(row[feature_cols].values)
             buy_prob  = float(buy_clf.predict_proba(X)[0][1])
             sell_prob = float(sell_clf.predict_proba(X)[0][1])
 
@@ -745,10 +748,10 @@ class StockModel:
             meta_conf_sell = None
             try:
                 if meta_buy_clf is not None:
-                    X_meta_buy  = np.hstack([row.values, [[buy_prob]]])
+                    X_meta_buy  = np.hstack([X, [[buy_prob]]])
                     meta_conf_buy  = float(meta_buy_clf.predict_proba(X_meta_buy)[0][1])
                 if meta_sell_clf is not None:
-                    X_meta_sell = np.hstack([row.values, [[sell_prob]]])
+                    X_meta_sell = np.hstack([X, [[sell_prob]]])
                     meta_conf_sell = float(meta_sell_clf.predict_proba(X_meta_sell)[0][1])
             except Exception as e:
                 logger.debug(f"[ML] Meta predict error for {self.symbol}: {e}")
