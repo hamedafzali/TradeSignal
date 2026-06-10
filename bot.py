@@ -232,6 +232,8 @@ def get_market_regime(spy_df: "pd.DataFrame | None" = None,
         if spy_df is None or vix_df is None:
             spy_df, vix_df = get_predict_market_context()
     except Exception:
+        pass
+    if spy_df is None and vix_df is None:
         return "unknown"
     try:
         spy_c = spy_df["Close"].squeeze()

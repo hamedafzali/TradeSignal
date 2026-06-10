@@ -33,12 +33,15 @@ _SECTOR_MAP: dict[str, str | None] = {
 
 # ── Market context cache ──────────────────────────────────────────────────────
 _mkt_cache: dict = {"ts": 0.0, "spy": None, "vix": None}
+_mkt_last_good: dict = {"spy": None, "vix": None}  # never cleared — stale fallback
 _MKT_TTL = 300  # seconds
 _sector_cache: dict[str, dict] = {}  # etf_ticker → {ts, df}
 
 
 def _get_market_ctx(period: str = "60d") -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
-    """SPY (1h) + VIX (1d) with 5-min in-memory cache. Both optional on failure."""
+    """SPY (1h) + VIX (1d) with 5-min in-memory cache.
+    On download failure falls back to the last successful fetch so regime
+    classification never returns 'unknown' due to a transient network error."""
     now = time.time()
     if now - _mkt_cache["ts"] < _MKT_TTL and _mkt_cache["spy"] is not None:
         return _mkt_cache["spy"], _mkt_cache["vix"]
@@ -49,6 +52,8 @@ def _get_market_ctx(period: str = "60d") -> tuple[pd.DataFrame | None, pd.DataFr
             spy.columns = spy.columns.droplevel(1)
         if spy.empty:
             spy = None
+        else:
+            _mkt_last_good["spy"] = spy
     except Exception as e:
         logger.debug(f"[ML] SPY fetch failed: {e}")
     try:
@@ -57,8 +62,17 @@ def _get_market_ctx(period: str = "60d") -> tuple[pd.DataFrame | None, pd.DataFr
             vix.columns = vix.columns.droplevel(1)
         if vix.empty:
             vix = None
+        else:
+            _mkt_last_good["vix"] = vix
     except Exception as e:
         logger.debug(f"[ML] VIX fetch failed: {e}")
+    # Use last known good data when current fetch failed
+    if spy is None and _mkt_last_good["spy"] is not None:
+        spy = _mkt_last_good["spy"]
+        logger.debug("[ML] SPY: using last known good data (fetch failed)")
+    if vix is None and _mkt_last_good["vix"] is not None:
+        vix = _mkt_last_good["vix"]
+        logger.debug("[ML] VIX: using last known good data (fetch failed)")
     _mkt_cache.update({"ts": now, "spy": spy, "vix": vix})
     return spy, vix
 
