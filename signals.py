@@ -355,7 +355,10 @@ def signal_from_df(symbol: str, df: pd.DataFrame,
         return None
 
     has_vol_spike = _vol_spike(df)
-    has_vol = _vol_sufficient(df)
+    # European stocks trade in thin 5-minute slices; skip the volume gate for them
+    # (RSI + MACD + EMA triple-confirmation is sufficient protection)
+    is_european = any(symbol.upper().endswith(sfx.upper()) for sfx in _XETRA_SUFFIXES)
+    has_vol = True if is_european else _vol_sufficient(df)
     macd_bull = float(macd_line.iloc[-1]) > float(signal_line.iloc[-1])
     macd_bear = float(macd_line.iloc[-1]) < float(signal_line.iloc[-1])
     ema_bull = float(ema9.iloc[-1]) > float(ema21.iloc[-1])
