@@ -626,7 +626,8 @@ _HTML = """<!DOCTYPE html>
               <button class="btn btn-sm" style="background:var(--surface2);color:var(--accent);border:1px solid var(--border)" onclick="refreshActivity()">↻</button>
             </div>
           </div>
-          <div id="health-cards" class="row g-2 mb-3"></div>
+          <div id="health-summary-bar" class="d-flex gap-3 mb-2 flex-wrap" style="font-size:.78rem"></div>
+        <div id="health-cards" class="row g-2 mb-3"></div>
           <div style="border-top:1px solid var(--border);padding-top:10px">
             <div class="section-head" style="font-size:.74rem;color:var(--muted);margin-bottom:6px">💡 What Needs Attention</div>
             <div id="suggestions"></div>
@@ -1836,8 +1837,19 @@ async function refreshActivity() {
     if (data.filters.symbol && symbolSelect) symbolSelect.value = data.filters.symbol;
   }
 
-  // ── Model health cards ──
+  // ── Model health cards with traffic lights ──
   const health = data.symbol_health || {};
+  function modelHealthStatus(h) {
+    const hasData = h.recent_count >= 3;
+    const ageH = h.last_trained ? (Date.now() - new Date(h.last_trained+'Z')) / 3600000 : null;
+    if (!h.last_trained && h.total_outcomes === 0) return {dot:'status-warn', label:'No model', color:'var(--yellow)'};
+    if (!hasData) return {dot:'status-warn', label:'Accumulating', color:'var(--yellow)'};
+    const wr = h.recent_acc;
+    const stale = ageH !== null && ageH > 24;
+    if (wr >= 52 && !stale) return {dot:'status-ok',   label:'Healthy',    color:'var(--green)'};
+    if (wr < 42 || stale)  return {dot:'status-bad',  label:wr<42?'Degraded':'Stale', color:'var(--red)'};
+    return {dot:'status-warn', label:'Watch',     color:'var(--yellow)'};
+  }
   document.getElementById('health-cards').innerHTML =
     Object.entries(health).map(([sym, h]) => {
       const hasData = h.recent_count > 0;
@@ -1847,18 +1859,23 @@ async function refreshActivity() {
       const accLabel = hasData
         ? `<strong style="color:${accColor}">${h.recent_acc}%</strong> <span style="color:#555">(${h.recent_count})</span>`
         : `<span style="color:#555">no live data yet</span>`;
+      const hs = modelHealthStatus(h);
       return `<div class="col-6 col-md-4 col-lg-3 col-xl-2">
-        <div class="health-card">
+        <div class="health-card" style="border-left:3px solid ${hs.color}">
           <div class="d-flex justify-content-between align-items-center mb-1">
             <span class="sym-tag">${sym}</span>
-            ${trendIcon(h.trend)}
+            <span class="d-flex align-items-center gap-1" style="font-size:.68rem">
+              <span class="status-dot ${hs.dot}"></span>
+              <span style="color:${hs.color}">${hs.label}</span>
+            </span>
           </div>
           <div class="progress mb-1" style="height:4px">
             <div class="progress-bar ${barCls}" style="width:${barW}%"></div>
           </div>
           <div style="font-size:.74rem;color:#8b8fa8">
-            Live: ${accLabel}
+            ${accLabel}
             ${hasData ? `<span style="color:#555"> · All: ${h.all_acc}%</span>` : ''}
+            ${trendIcon(h.trend)}
           </div>
           <div class="mt-1" style="font-size:.70rem;color:#555">
             ${h.total_outcomes} outcomes · ${h.pending} pending<br>
@@ -1867,6 +1884,20 @@ async function refreshActivity() {
         </div>
       </div>`;
     }).join('') || '<div class="col-12" style="color:#555">No training data yet — models train automatically once signals accumulate outcomes.</div>';
+
+  // Health summary bar
+  const healthEntries = Object.entries(health);
+  const nHealthy = healthEntries.filter(([,h]) => modelHealthStatus(h).dot === 'status-ok').length;
+  const nWatch   = healthEntries.filter(([,h]) => modelHealthStatus(h).dot === 'status-warn').length;
+  const nBad     = healthEntries.filter(([,h]) => modelHealthStatus(h).dot === 'status-bad').length;
+  const summaryEl = document.getElementById('health-summary-bar');
+  if (summaryEl) {
+    summaryEl.innerHTML = `
+      <span><span class="status-dot status-ok"></span><span style="color:var(--green)">${nHealthy} Healthy</span></span>
+      <span><span class="status-dot status-warn"></span><span style="color:var(--yellow)">${nWatch} Watching</span></span>
+      <span><span class="status-dot status-bad"></span><span style="color:var(--red)">${nBad} Degraded/Stale</span></span>
+      <span style="color:var(--muted)">${healthEntries.length} total symbols</span>`;
+  }
 
   const reasonMap = {
     tp_hit: 'TP Hit',
