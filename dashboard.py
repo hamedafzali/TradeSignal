@@ -352,19 +352,45 @@ _HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- Key metrics -->
-    <div class="row g-2 mb-2">
-      <div class="col-6 col-md-3"><div class="card p-2 px-3"><div class="card-title mb-1">Total Signals</div><div class="stat-val" id="s-total">—</div></div></div>
-      <div class="col-6 col-md-3"><div class="card p-2 px-3"><div class="card-title mb-1">Today</div><div class="stat-val" id="s-today">—</div></div></div>
-      <div class="col-6 col-md-3"><div class="card p-2 px-3"><div class="card-title mb-1">Accuracy</div><div class="stat-val" id="s-acc">—</div></div></div>
-      <div class="col-6 col-md-3"><div class="card p-2 px-3"><div class="card-title mb-1">Users</div><div class="stat-val" id="s-users">—</div></div></div>
-    </div>
-    <!-- Regime badge + attribution -->
-    <div class="card mb-2 p-2 px-3 d-flex flex-row align-items-center gap-3 flex-wrap" style="font-size:.8rem">
-      <span style="color:var(--muted)">Market Regime:</span>
-      <span id="regime-badge" class="badge fs-6 px-3 py-1">—</span>
-      <span style="color:var(--dim)">·</span>
-      <span id="regime-attribution" style="color:var(--muted)"></span>
+    <!-- Market Intelligence panel -->
+    <div class="card mb-2 p-3">
+      <div class="row g-2 align-items-stretch">
+        <!-- Sessions -->
+        <div class="col-md-5">
+          <div class="d-flex gap-3 flex-wrap mb-2">
+            <div>
+              <div class="ops-label">XETRA</div>
+              <div id="market-xetra-cc" class="ops-value mt-1">—</div>
+              <div style="font-size:.68rem;color:var(--muted)">09:00–17:30 CET</div>
+            </div>
+            <div>
+              <div class="ops-label">US</div>
+              <div id="market-us-cc" class="ops-value mt-1">—</div>
+              <div style="font-size:.68rem;color:var(--muted)">09:30–16:00 ET</div>
+            </div>
+            <div>
+              <div class="ops-label">Crypto</div>
+              <div id="market-crypto-cc" class="ops-value mt-1"><span class="status-dot status-ok"></span>24/7</div>
+            </div>
+          </div>
+          <div style="font-size:.72rem;color:var(--dim)" id="market-clock-cc"></div>
+        </div>
+        <!-- Regime -->
+        <div class="col-md-4">
+          <div class="ops-label mb-1">Market Regime</div>
+          <div class="d-flex align-items-center gap-2">
+            <span id="regime-badge" class="badge fs-6 px-3 py-1">—</span>
+          </div>
+          <div id="regime-attribution" class="mt-1" style="font-size:.72rem;color:var(--muted)"></div>
+        </div>
+        <!-- Key stats -->
+        <div class="col-md-3">
+          <div class="row g-1">
+            <div class="col-6"><div class="ops-card"><div class="ops-label">Signals</div><div class="ops-value" id="s-total">—</div><div class="ops-meta" id="s-today-meta">today: —</div></div></div>
+            <div class="col-6"><div class="ops-card"><div class="ops-label">Win Rate</div><div class="ops-value" id="s-acc">—</div><div class="ops-meta" id="s-users-meta">— users</div></div></div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="row g-2 mb-2">
@@ -1215,6 +1241,19 @@ function updateMarketStatus() {
   document.getElementById('market-xetra').innerHTML = mkDot(xetraOpen, '🇩🇪 XETRA', '');
   document.getElementById('market-crypto').innerHTML= mkDot(true,      '₿ Crypto',  '');
   document.getElementById('market-times').textContent = `CET ${cetStr}  ·  ET ${etStr}`;
+
+  // Compact market intelligence panel
+  function mkSmall(open, label) {
+    const cls = open ? 'status-ok' : 'status-bad';
+    const status = open ? 'Open' : 'Closed';
+    return `<span class="status-dot ${cls}"></span><span style="color:var(--text)">${status}</span>`;
+  }
+  const usEl = document.getElementById('market-us-cc');
+  const xeEl = document.getElementById('market-xetra-cc');
+  const clk  = document.getElementById('market-clock-cc');
+  if (usEl)  usEl.innerHTML  = mkSmall(usOpen,    '');
+  if (xeEl)  xeEl.innerHTML  = mkSmall(xetraOpen, '');
+  if (clk)   clk.textContent = `CET ${cetStr}  ·  ET ${etStr}`;
 }
 
 // ── Overview ──────────────────────────────────────────────────────────────────
@@ -1241,10 +1280,15 @@ async function refreshOverview() {
     ).join('  ·  ');
   }
 
-  document.getElementById('s-users').textContent = stats.total_users;
   document.getElementById('s-total').textContent = stats.total_signals;
-  document.getElementById('s-today').textContent = stats.today_signals;
   document.getElementById('s-acc').textContent = stats.resolved > 0 ? stats.accuracy+'%' : 'N/A';
+  const todayMeta = document.getElementById('s-today-meta');
+  if (todayMeta) todayMeta.textContent = 'today: ' + stats.today_signals;
+  const usersMeta = document.getElementById('s-users-meta');
+  if (usersMeta) usersMeta.textContent = stats.total_users + ' users';
+  // Keep backward-compat if old elements still exist
+  const su = document.getElementById('s-users'); if (su) su.textContent = stats.total_users;
+  const st = document.getElementById('s-today'); if (st) st.textContent = stats.today_signals;
   document.getElementById('last-refresh').textContent = 'Updated '+new Date().toLocaleTimeString();
   refreshOps();
 
