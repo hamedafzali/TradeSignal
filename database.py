@@ -654,15 +654,6 @@ def get_stats() -> dict:
         today_signals = conn.execute(
             "SELECT COUNT(*) FROM signals WHERE sent_at LIKE ?", (f"{today}%",)
         ).fetchone()[0]
-        correct = conn.execute(
-            "SELECT COUNT(*) FROM signals WHERE outcome = 'correct'"
-        ).fetchone()[0]
-        incorrect = conn.execute(
-            "SELECT COUNT(*) FROM signals WHERE outcome = 'incorrect'"
-        ).fetchone()[0]
-        resolved = correct + incorrect  # exclude neutral from accuracy denominator
-        accuracy = round(correct / resolved * 100, 1) if resolved > 0 else 0
-
         symbol_rows = conn.execute("""
             SELECT symbol,
                    COUNT(*) AS total,
@@ -673,6 +664,12 @@ def get_stats() -> dict:
             WHERE symbol IN (SELECT symbol FROM symbols WHERE active=1)
             GROUP BY symbol
         """).fetchall()
+        # Derive global accuracy from active-symbol rows to stay consistent with per-symbol
+        correct = sum(r["correct"] for r in symbol_rows)
+        incorrect = sum(r["incorrect"] for r in symbol_rows)
+        total_signals = sum(r["total"] for r in symbol_rows)
+        resolved = correct + incorrect  # exclude neutral from accuracy denominator
+        accuracy = round(correct / resolved * 100, 1) if resolved > 0 else 0
         per_symbol = {}
         for r in symbol_rows:
             decisive = r["correct"] + r["incorrect"]
