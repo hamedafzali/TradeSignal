@@ -43,7 +43,7 @@ _MKT_FALLBACK_MAX = 4 * 3600  # 4h — don't use stale data older than this
 _sector_cache: dict[str, dict] = {}  # etf_ticker → {ts, df}
 
 
-def _get_market_ctx(period: str = "60d") -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+def _get_market_ctx(period: str = "730d") -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """SPY (1h) + VIX (1d) with 5-min in-memory cache.
     On download failure falls back to the last successful fetch so regime
     classification never returns 'unknown' due to a transient network error."""
@@ -90,7 +90,7 @@ def get_predict_market_context() -> tuple[pd.DataFrame | None, pd.DataFrame | No
     return _get_market_ctx()
 
 
-def _get_sector_ctx(symbol: str, period: str = "60d") -> pd.DataFrame | None:
+def _get_sector_ctx(symbol: str, period: str = "730d") -> pd.DataFrame | None:
     """Fetch the sector SPDR ETF for a symbol. Returns None for crypto/unknown."""
     etf = _SECTOR_MAP.get(symbol.upper())
     if etf is None:
@@ -269,8 +269,11 @@ def build_labels_tpsl(df: pd.DataFrame,
                       outcome_bars: int = 24) -> tuple["pd.Series", "pd.Series"]:
     """
     TP/SL-aligned labels matching the live outcome resolution logic exactly.
-    Returns (y_buy, y_sell) — both are 0/1 series where 1 = "this direction wins".
-    Eliminates the train/live mismatch of forward-return labeling.
+    Returns (y_buy, y_sell) — 0/1 series where 1 = "this direction wins".
+    Rows whose outcome window is incomplete (warmup head, final outcome_bars
+    tail, bad ATR) are NaN so callers' dropna() removes them — previously they
+    trained as fake "don't fire" negatives, biasing the model against firing
+    on exactly the newest data.
     """
     close = df["Close"].squeeze()
     high  = df["High"].squeeze()
@@ -284,14 +287,20 @@ def build_labels_tpsl(df: pd.DataFrame,
     atr = tr.rolling(14).mean()
 
     n = len(df)
-    y_buy  = pd.Series(0, index=df.index, dtype=int)
-    y_sell = pd.Series(0, index=df.index, dtype=int)
+    # numpy arrays: the nested loop below does ~150K scalar reads on 730d data —
+    # pandas .iloc there costs seconds per symbol, numpy costs milliseconds
+    close_a = close.to_numpy(dtype=float)
+    high_a  = high.to_numpy(dtype=float)
+    low_a   = low.to_numpy(dtype=float)
+    atr_a   = atr.to_numpy(dtype=float)
+    yb = np.full(n, np.nan)
+    ys = np.full(n, np.nan)
 
     for i in range(14, n - outcome_bars):
-        atr_val = float(atr.iloc[i])
+        atr_val = atr_a[i]
         if np.isnan(atr_val) or atr_val <= 0:
-            continue
-        entry = float(close.iloc[i])
+            continue  # stays NaN — dropped by callers, not trained as a negative
+        entry = close_a[i]
         tp_buy  = entry + atr_val * tp_mult
         sl_buy  = entry - atr_val * sl_mult
         tp_sell = entry - atr_val * tp_mult
@@ -299,8 +308,8 @@ def build_labels_tpsl(df: pd.DataFrame,
 
         buy_result = sell_result = 0
         for j in range(i + 1, i + 1 + outcome_bars):
-            h = float(high.iloc[j])
-            l = float(low.iloc[j])
+            h = high_a[j]
+            l = low_a[j]
             # BUY outcome
             if buy_result == 0:
                 if h >= tp_buy and l <= sl_buy:
@@ -320,10 +329,11 @@ def build_labels_tpsl(df: pd.DataFrame,
             if buy_result != 0 and sell_result != 0:
                 break
 
-        y_buy.iloc[i]  = 1 if buy_result  == 1 else 0
-        y_sell.iloc[i] = 1 if sell_result == 1 else 0
+        yb[i] = 1.0 if buy_result  == 1 else 0.0
+        ys[i] = 1.0 if sell_result == 1 else 0.0
 
-    return y_buy, y_sell
+    return (pd.Series(yb, index=df.index, dtype=float),
+            pd.Series(ys, index=df.index, dtype=float))
 
 
 class StockModel:
@@ -368,6 +378,8 @@ class StockModel:
         self.outcome_samples  = 0
         self.outcome_count_at_train = 0
         self.last_blend_count = 0  # live outcomes actually blended in last train()
+        self.val_auc_buy:  float | None = None  # holdout AUC from last train()
+        self.val_auc_sell: float | None = None
         self._path = os.path.join(CACHE_DIR, f"{symbol}.pkl")
         self._load()
 
@@ -402,12 +414,16 @@ class StockModel:
 
     def train(self, outcome_data: list[dict] | None = None, _log: bool = True) -> bool:
         """
-        Train on 60 days of hourly data, then blend in real outcome samples.
+        Train on up to 730 days of hourly data, then blend in real outcome
+        samples (gated by MIN_LIVE_BLEND per direction).
         outcome_data: list of {"features": {col: val, ...}, "label": int}
         """
         logger.info(f"[ML] Training {self.symbol}...")
         try:
-            df = yf.download(self.symbol, period="60d", interval="1h", progress=False, auto_adjust=True)
+            # 730d is yfinance's max for 1h bars: ~3,200 samples for stocks vs
+            # ~390 from 60d — and covers multiple market regimes instead of
+            # only the most recent one.
+            df = yf.download(self.symbol, period="730d", interval="1h", progress=False, auto_adjust=True)
             if len(df) < 200:
                 logger.warning(f"[ML] Too little data for {self.symbol}")
                 return False
@@ -437,8 +453,6 @@ class StockModel:
             # Row duplication causes GBM to memorise exact feature vectors at those
             # outcome bars — sample_weight applies the same boost via the loss function
             # without creating near-duplicate rows that overfit.
-            sample_weight_buy  = np.ones(len(X))
-            sample_weight_sell = np.ones(len(X))
             self.last_blend_count = 0
             # Per-direction gate: blend BUY outcomes only once there are enough of
             # them to constitute a sample, same for SELL. With ~98% BUY signals,
@@ -458,6 +472,29 @@ class StockModel:
                     outcome_data = [it for it in outcome_data
                                     if (blend_buy and abs(it["label"]) == 1)
                                     or (blend_sell and abs(it["label"]) == 2)]
+
+            # ── Temporal split with embargo, BEFORE blending live outcomes ──────
+            # Labels look ahead `outcome_bars` (24) bars, so the last 24 rows of
+            # the train portion share outcome windows with the first calibration
+            # rows — the embargo gap removes that leakage. Live outcomes are
+            # appended to the TRAIN portion after the split; previously they were
+            # appended to X before splitting and always landed in the calibration
+            # tail, so they calibrated probabilities but never trained the
+            # classifiers at all.
+            _EMBARGO = 24  # = build_labels_tpsl outcome_bars
+            n_cal = max(20, len(X) // 5)
+            if n_cal + _EMBARGO < len(X) - 50:
+                X_main_raw, X_cal_raw = X[:-(n_cal + _EMBARGO)], X[-n_cal:]
+                yb_main, yb_cal       = y_buy[:-(n_cal + _EMBARGO)],  y_buy[-n_cal:]
+                ys_main, ys_cal       = y_sell[:-(n_cal + _EMBARGO)], y_sell[-n_cal:]
+            else:
+                X_main_raw, X_cal_raw = X, X
+                yb_main, yb_cal       = y_buy,  y_buy
+                ys_main, ys_cal       = y_sell, y_sell
+
+            sw_buy_main  = np.ones(len(X_main_raw))
+            sw_sell_main = np.ones(len(X_main_raw))
+
             if outcome_data:
                 extra_rows, extra_buy, extra_sell = [], [], []
                 sw_buy_extra, sw_sell_extra = [], []
@@ -484,32 +521,17 @@ class StockModel:
                         sw_buy_extra.append(0.5); sw_sell_extra.append(5.0)
                 if extra_rows:
                     n_real = len(extra_rows)
-                    X      = np.vstack([X, extra_rows])
-                    y_buy  = np.concatenate([y_buy,  extra_buy])
-                    y_sell = np.concatenate([y_sell, extra_sell])
-                    sample_weight_buy  = np.concatenate([np.ones(len(X) - n_real), sw_buy_extra])
-                    sample_weight_sell = np.concatenate([np.ones(len(X) - n_real), sw_sell_extra])
+                    X_main_raw   = np.vstack([X_main_raw, extra_rows])
+                    yb_main      = np.concatenate([yb_main, extra_buy])
+                    ys_main      = np.concatenate([ys_main, extra_sell])
+                    sw_buy_main  = np.concatenate([sw_buy_main,  sw_buy_extra])
+                    sw_sell_main = np.concatenate([sw_sell_main, sw_sell_extra])
                     self.last_blend_count = n_real
-                    logger.info(f"[ML] {self.symbol}: blended {n_real} real outcomes (5x per-classifier sample_weight)")
-
-            # Split raw X before fitting the scaler — prevents calibration-set
-            # distribution from leaking into the scaler's mean/variance.
-            n_cal = max(20, len(X) // 5)
-            if n_cal < len(X) - 50:
-                X_main_raw, X_cal_raw = X[:-n_cal], X[-n_cal:]
-                yb_main, yb_cal       = y_buy[:-n_cal],  y_buy[-n_cal:]
-                ys_main, ys_cal       = y_sell[:-n_cal], y_sell[-n_cal:]
-            else:
-                X_main_raw, X_cal_raw = X, X
-                yb_main, yb_cal       = y_buy,  y_buy
-                ys_main, ys_cal       = y_sell, y_sell
+                    logger.info(f"[ML] {self.symbol}: blended {n_real} real outcomes into training set (5x per-classifier sample_weight)")
 
             X_main = self.scaler.fit_transform(X_main_raw)   # fit ONLY on train
             X_cal  = self.scaler.transform(X_cal_raw)         # transform without refit
 
-            n_main = len(X_main)
-            sw_buy_main  = sample_weight_buy[:n_main]
-            sw_sell_main = sample_weight_sell[:n_main]
             self.clf_buy.fit(X_main, yb_main, sample_weight=sw_buy_main)
             self.clf_sell.fit(X_main, ys_main, sample_weight=sw_sell_main)
 
@@ -580,6 +602,25 @@ class StockModel:
                 logger.debug(f"[ML] Calibration skipped for {self.symbol}: {e}")
                 self.cal_buy = None
                 self.cal_sell = None
+
+            # ── Holdout validation: AUC on the embargoed calibration tail ────────
+            # Out-of-sample skill measurement per retrain. AUC 0.5 = no skill;
+            # this is the evidence base for promoting/rejecting retrained models.
+            self.val_auc_buy = None
+            self.val_auc_sell = None
+            try:
+                from sklearn.metrics import roc_auc_score
+                clf_b = self.cal_buy  if self.cal_buy  is not None else self.clf_buy
+                clf_s = self.cal_sell if self.cal_sell is not None else self.clf_sell
+                if len(np.unique(yb_cal)) > 1:
+                    self.val_auc_buy = float(roc_auc_score(yb_cal, clf_b.predict_proba(X_cal)[:, 1]))
+                if len(np.unique(ys_cal)) > 1:
+                    self.val_auc_sell = float(roc_auc_score(ys_cal, clf_s.predict_proba(X_cal)[:, 1]))
+                fmt = lambda v: f"{v:.3f}" if v is not None else "n/a"
+                logger.info(f"[ML] {self.symbol} holdout AUC: "
+                            f"buy={fmt(self.val_auc_buy)} sell={fmt(self.val_auc_sell)}")
+            except Exception as e:
+                logger.debug(f"[ML] Holdout AUC skipped for {self.symbol}: {e}")
 
             # ── Meta-labeling: train on calibration set (never seen by primary) ──
             # meta_label_buy[i] = 1 when primary predicted BUY and it was correct
@@ -679,12 +720,14 @@ class StockModel:
             y_buy  = combined["y_buy"].values
             y_sell = combined["y_sell"].values
 
-            # Scaler: fit only on training partition
+            # Scaler: fit only on training partition. Embargo gap (24 bars =
+            # label lookahead) prevents outcome-window leakage into calibration.
+            _EMBARGO = 24
             n_cal = max(20, len(X) // 5)
-            if n_cal < len(X) - 50:
-                X_main_raw, X_cal_raw = X[:-n_cal], X[-n_cal:]
-                yb_main, yb_cal       = y_buy[:-n_cal],  y_buy[-n_cal:]
-                ys_main, ys_cal       = y_sell[:-n_cal], y_sell[-n_cal:]
+            if n_cal + _EMBARGO < len(X) - 50:
+                X_main_raw, X_cal_raw = X[:-(n_cal + _EMBARGO)], X[-n_cal:]
+                yb_main, yb_cal       = y_buy[:-(n_cal + _EMBARGO)],  y_buy[-n_cal:]
+                ys_main, ys_cal       = y_sell[:-(n_cal + _EMBARGO)], y_sell[-n_cal:]
             else:
                 X_main_raw, X_cal_raw = X, X
                 yb_main, yb_cal       = y_buy, y_buy
