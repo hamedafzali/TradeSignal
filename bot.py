@@ -1307,41 +1307,13 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
 
     elif action == "scan":
-        await query.message.reply_text("🔍 Scanning all symbols…")
-        session = market_session()
-        session_labels = {
-            "open": "🟢 Market open", "pre": "🌅 Pre-market",
-            "after": "🌙 After-hours", "closed": "⛔ Market closed",
-        }
-        lines = []
-        for symbol in _get_symbols():
-            try:
-                interval = "1h" if is_crypto(symbol) else "5m"
-                period = "30d" if is_crypto(symbol) else "5d"
-                df = yf.download(symbol, period=period, interval=interval, progress=False, auto_adjust=True)
-                if df.empty or len(df) < 50:
-                    lines.append(f"*{symbol}*: no data")
-                    continue
-                close = df["Close"].squeeze()
-                rsi_val = float(_rsi(close).iloc[-1])
-                macd_line, sig_line = _macd(close)
-                ema9 = close.ewm(span=9, adjust=False).mean()
-                ema21 = close.ewm(span=21, adjust=False).mean()
-                price = float(close.iloc[-1])
-                macd_dir = "↑" if float(macd_line.iloc[-1]) > float(sig_line.iloc[-1]) else "↓"
-                ema_dir = "↑" if float(ema9.iloc[-1]) > float(ema21.iloc[-1]) else "↓"
-                rsi_label = "🔴 OB" if rsi_val > 60 else ("🟢 OS" if rsi_val < 40 else "")
-                crypto_tag = " ₿" if is_crypto(symbol) else ""
-                lines.append(
-                    f"*{symbol}*{crypto_tag}  `${price:.2f}`\n"
-                    f"  RSI `{rsi_val:.0f}` {rsi_label}  ·  MACD {macd_dir}  ·  EMA {ema_dir}"
-                )
-            except Exception as e:
-                lines.append(f"*{symbol}*: error — {e}")
-        await query.message.reply_text(
-            f"{session_labels.get(session, '')}\n\n" + "\n\n".join(lines),
-            parse_mode="Markdown",
-        )
+        # Delegate to cmd_scan (no-arg mode = interesting symbols only)
+        class _FakeUpdate:
+            message = query.message
+            effective_user = query.from_user
+        class _FakeCtx:
+            args = []
+        await cmd_scan(_FakeUpdate(), _FakeCtx())
 
     elif action == "stats":
         s = get_stats()
@@ -1399,20 +1371,12 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
 
     elif action == "help":
-        await query.message.reply_text(
-            "📋 *Available Commands*\n\n"
-            "/start — welcome message\n"
-            "/menu — show this menu\n"
-            "/status — open positions with live P&L\n"
-            "/pnl — closed trade history\n"
-            "/cancel SYMBOL — manually close a position\n"
-            "/subscribe SYMBOL — get DM alerts for a symbol\n"
-            "/unsubscribe — remove all subscriptions\n"
-            "/backtest SYMBOL [years] — historical backtest\n"
-            "/scan — live indicator snapshot\n"
-            "/stats — signal accuracy stats",
-            parse_mode="Markdown",
-        )
+        class _FU:
+            message = query.message
+            effective_user = query.from_user
+        class _FC:
+            args = []
+        await cmd_help(_FU(), _FC())
 
 
 async def subscribe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1650,16 +1614,34 @@ async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(header + "\n\n" + "\n".join(lines), parse_mode="Markdown")
 
 
-async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
     log_user(uid, update.effective_user.username or "")
     pref = get_user_pref(uid)
     lang = pref["lang"]
+
     if not context.args:
-        await update.message.reply_text(t("cancel_usage", lang=lang))
+        # No arg — show open positions as inline close buttons
+        positions = get_user_open_positions(str(uid))
+        if not positions:
+            await update.message.reply_text(t("status_no_positions", lang=lang))
+            return
+        buttons = []
+        for p in positions:
+            label = f"❌ {p['symbol']}"
+            buttons.append([InlineKeyboardButton(label, callback_data=f"close:{p['symbol']}")])
+        prompt = ("کدام موقعیت را می‌خواهید ببندید؟" if lang == "fa"
+                  else "Which position do you want to close?")
+        await update.message.reply_text(
+            prompt,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
         return
+
     symbol = context.args[0].upper()
     df = yf.download(symbol, period="1d", interval="5m", progress=False, auto_adjust=True)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.droplevel(1)
     exit_price = float(df["Close"].iloc[-1]) if not df.empty else 0.0
     result = close_position(str(uid), symbol, exit_price)
     if result:
@@ -1672,6 +1654,11 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
     else:
         await update.message.reply_text(t("cancel_not_found", lang=lang, symbol=symbol))
+
+
+# Backward-compatible alias
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await cmd_close(update, context)
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1697,6 +1684,51 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    log_user(update.effective_user.id, update.effective_user.username or "")
+    pref = get_user_pref(update.effective_user.id)
+    lang = pref["lang"]
+    if lang == "fa":
+        text = (
+            "📋 *دستورات موجود*\n\n"
+            "/start — خوش‌آمدگویی\n"
+            "/menu — منوی اصلی\n"
+            "/settings — زبان و سطح تجربه\n\n"
+            "*معاملات*\n"
+            "/status — موقعیت‌های باز با سود/زیان زنده\n"
+            "/pnl — تاریخچه معاملات بسته‌شده\n"
+            "/close — بستن موقعیت (یا /close SYMBOL)\n\n"
+            "*تحلیل*\n"
+            "/scan — نمادهای قابل توجه (RSI حدی)\n"
+            "/scan SYMBOL — تحلیل دقیق یک نماد\n"
+            "/backtest SYMBOL [years] — بک‌تست تاریخی\n"
+            "/stats — دقت سیگنال‌ها\n\n"
+            "*اطلاع‌رسانی*\n"
+            "/subscribe SYMBOL — دریافت هشدار DM\n"
+            "/unsubscribe — حذف اشتراک‌ها\n"
+        )
+    else:
+        text = (
+            "📋 *Available Commands*\n\n"
+            "/start — Welcome & onboarding\n"
+            "/menu — Main menu\n"
+            "/settings — Language & experience level\n\n"
+            "*Positions*\n"
+            "/status — Open positions with live P&L\n"
+            "/pnl — Closed trade history\n"
+            "/close — Close a position (or /close SYMBOL)\n\n"
+            "*Analysis*\n"
+            "/scan — Notable symbols (RSI extremes)\n"
+            "/scan SYMBOL — Detailed analysis of one symbol\n"
+            "/backtest SYMBOL \\[years\\] — Historical backtest\n"
+            "/stats — Signal accuracy stats\n\n"
+            "*Alerts*\n"
+            "/subscribe SYMBOL — Get DM alerts for a symbol\n"
+            "/unsubscribe — Remove subscriptions\n"
+        )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
 async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     log_user(user.id, user.username or "")
@@ -1708,17 +1740,26 @@ async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if not context.args:
         subs = get_user_subscriptions(user_id)
+        # Always show inline buttons so user can tap to subscribe/manage
+        buttons = [
+            InlineKeyboardButton(
+                ("✅ " if s in subs else "") + s,
+                callback_data=f"sub:{s}"
+            )
+            for s in active
+        ]
+        rows = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
+        prompt = ("اشتراک‌های شما با ✅ نشان داده شده‌اند. برای افزودن روی نماد بزنید:" if lang == "fa"
+                  else "Your active subscriptions are marked ✅. Tap a symbol to subscribe:")
+        current_note = ""
         if subs:
-            await update.message.reply_text(
-                t("subscribe_current", lang=lang,
-                  subs=", ".join(f"`{s}`" for s in subs), all=all_fmt),
-                parse_mode="Markdown",
-            )
-        else:
-            await update.message.reply_text(
-                t("subscribe_prompt", lang=lang, all=all_fmt),
-                parse_mode="Markdown",
-            )
+            current_note = (f"\n\nاشتراک فعال: {', '.join(f'`{s}`' for s in subs)}" if lang == "fa"
+                            else f"\n\nActive: {', '.join(f'`{s}`' for s in subs)}")
+        await update.message.reply_text(
+            prompt + current_note,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
         return
 
     requested = [s.strip().upper() for s in context.args]
@@ -1756,10 +1797,13 @@ async def cmd_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     log_user(update.effective_user.id, update.effective_user.username or "")
     if not context.args:
-        symbols_list = ", ".join(f"`{s}`" for s in SYMBOLS)
+        active = _get_symbols()
+        buttons = [InlineKeyboardButton(sym, callback_data=f"bt:{sym}") for sym in active]
+        rows = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
         await update.message.reply_text(
-            f"Usage: /backtest SYMBOL [years]\n\nExample: /backtest AAPL 2\n\nAvailable: {symbols_list}",
+            "📊 *Backtest* — choose a symbol:\n_(or: /backtest SYMBOL \\[years\\])_",
             parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(rows),
         )
         return
 
@@ -1789,41 +1833,147 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "open": "🟢 Market open", "pre": "🌅 Pre-market",
         "after": "🌙 After-hours", "closed": "⛔ Market closed",
     }
-    await update.message.reply_text(f"🔍 Scanning... {session_labels.get(session, '')}")
+    session_str = session_labels.get(session, "")
 
-    lines = []
+    # /scan SYMBOL — detailed single-symbol analysis
+    if context.args:
+        symbol = context.args[0].upper()
+        await update.message.reply_text(f"🔍 Scanning *{symbol}*…", parse_mode="Markdown")
+        try:
+            interval = "1h" if is_crypto(symbol) else "5m"
+            period = "30d" if is_crypto(symbol) else "5d"
+            df = yf.download(symbol, period=period, interval=interval, progress=False, auto_adjust=True)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(1)
+            if df.empty or len(df) < 50:
+                await update.message.reply_text(f"❌ No data for *{symbol}*", parse_mode="Markdown")
+                return
+            close = df["Close"].squeeze()
+            rsi_val = float(_rsi(close).iloc[-1])
+            macd_line, sig_line = _macd(close)
+            ema9  = close.ewm(span=9,  adjust=False).mean()
+            ema21 = close.ewm(span=21, adjust=False).mean()
+            price = float(close.iloc[-1])
+            atr_series = _atr(df)
+            atr_val = float(atr_series.iloc[-1]) if not atr_series.empty else 0.0
+            vol = df["Volume"].squeeze().astype(float)
+            vol_avg = float(vol.iloc[-20:].mean()) if len(vol) >= 20 else 0.0
+            vol_now = float(vol.iloc[-1])
+            vol_ratio = vol_now / vol_avg if vol_avg > 0 else 1.0
+
+            macd_val = float(macd_line.iloc[-1])
+            sig_val  = float(sig_line.iloc[-1])
+            macd_dir = "↑ bullish" if macd_val > sig_val else "↓ bearish"
+            ema_dir  = "↑ bullish" if float(ema9.iloc[-1]) > float(ema21.iloc[-1]) else "↓ bearish"
+
+            rsi_label = ("🔴 Overbought" if rsi_val > 65 else
+                         "🟢 Oversold"   if rsi_val < 35 else
+                         "⚪ Neutral")
+
+            _, df_1h = get_1h_bias(symbol)
+            bias_1h, _ = get_1h_bias(symbol)
+
+            model = models.get(symbol)
+            ml_result = {}
+            if model and not df.empty:
+                ml_result = model.predict(df, timeframe=interval)
+            buy_prob  = ml_result.get("buy_prob")
+            sell_prob = ml_result.get("sell_prob")
+            ai_signal = ml_result.get("ai_signal")
+
+            ai_lines = []
+            if buy_prob is not None:
+                bar = "█" * int(buy_prob * 10) + "░" * (10 - int(buy_prob * 10))
+                ai_lines.append(f"  AI Buy:  `{bar}` `{buy_prob*100:.0f}%`")
+            if sell_prob is not None:
+                bar = "█" * int(sell_prob * 10) + "░" * (10 - int(sell_prob * 10))
+                ai_lines.append(f"  AI Sell: `{bar}` `{sell_prob*100:.0f}%`")
+            if ai_signal:
+                ai_lines.append(f"  AI Signal: *{ai_signal}*")
+
+            last_sig = get_last_signal_action(symbol, within_hours=6)
+            recent_line = f"\n⚡ Recent signal: *{last_sig}* (last 6h)" if last_sig else ""
+
+            name = _get_company_name(symbol)
+            display = f"{name} ({symbol})" if name else symbol
+            crypto_tag = " ₿" if is_crypto(symbol) else ""
+
+            msg = (
+                f"🔍 *{display}*{crypto_tag}  {session_str}\n\n"
+                f"💰 Price:  `${price:.2f}`\n"
+                f"📊 RSI:    `{rsi_val:.1f}` — {rsi_label}\n"
+                f"📈 MACD:   {macd_dir}\n"
+                f"📉 EMA:    {ema_dir}\n"
+                f"📏 ATR:    `{atr_val:.2f}` ({atr_val/price*100:.2f}%)\n"
+                f"📦 Volume: `{vol_ratio:.1f}×` avg"
+                + (f"\n🕐 1h bias: *{bias_1h}*" if bias_1h else "")
+                + ("\n\n*AI Analysis:*\n" + "\n".join(ai_lines) if ai_lines else "")
+                + recent_line
+            )
+            await update.message.reply_text(msg, parse_mode="Markdown")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error scanning {symbol}: {e}")
+        return
+
+    # /scan (no arg) — show only "interesting" symbols: RSI extremes or recent signal
+    await update.message.reply_text(f"🔍 Scanning watchlist… {session_str}")
+    interesting = []
     for symbol in _get_symbols():
         try:
             interval = "1h" if is_crypto(symbol) else "5m"
             period = "30d" if is_crypto(symbol) else "5d"
             df = yf.download(symbol, period=period, interval=interval, progress=False, auto_adjust=True)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(1)
             if df.empty or len(df) < 50:
-                lines.append(f"*{symbol}*: no data")
                 continue
             close = df["Close"].squeeze()
             rsi_val = float(_rsi(close).iloc[-1])
-            macd_line, sig_line = _macd(close)
-            ema9 = close.ewm(span=9, adjust=False).mean()
-            ema21 = close.ewm(span=21, adjust=False).mean()
             price = float(close.iloc[-1])
-            macd_dir = ("↑" if float(macd_line.iloc[-1]) > float(sig_line.iloc[-1]) else "↓")
-            ema_dir = ("↑" if float(ema9.iloc[-1]) > float(ema21.iloc[-1]) else "↓")
-            rsi_label = ("🔴 OB" if rsi_val > 60 else "🟢 OS" if rsi_val < 40 else "")
-            model = models.get(symbol)
-            ai_buy = model.predict(df).get("buy_prob") if model else None
-            ai_text = f"  ·  AI `{ai_buy*100:.0f}%`" if ai_buy is not None else ""
-            crypto_tag = " ₿" if is_crypto(symbol) else ""
-            lines.append(
-                f"*{symbol}*{crypto_tag}  `${price:.2f}`\n"
-                f"  RSI `{rsi_val:.0f}` {rsi_label}  ·  MACD {macd_dir}  ·  EMA {ema_dir}{ai_text}"
-            )
-        except Exception as e:
-            lines.append(f"*{symbol}*: error — {e}")
+            macd_line, sig_line = _macd(close)
+            ema9  = close.ewm(span=9,  adjust=False).mean()
+            ema21 = close.ewm(span=21, adjust=False).mean()
+            macd_dir = "↑" if float(macd_line.iloc[-1]) > float(sig_line.iloc[-1]) else "↓"
+            ema_dir  = "↑" if float(ema9.iloc[-1]) > float(ema21.iloc[-1]) else "↓"
 
-    await update.message.reply_text(
-        f"{session_labels.get(session, '')}\n\n" + "\n\n".join(lines),
-        parse_mode="Markdown",
-    )
+            flags = []
+            if rsi_val < 35:
+                flags.append(f"🟢 RSI {rsi_val:.0f} oversold")
+            elif rsi_val > 65:
+                flags.append(f"🔴 RSI {rsi_val:.0f} overbought")
+
+            last_sig = get_last_signal_action(symbol, within_hours=6)
+            if last_sig:
+                flags.append(f"⚡ {last_sig} signal fired")
+
+            if not flags:
+                continue
+
+            model = models.get(symbol)
+            ai_buy = None
+            if model and not df.empty:
+                ai_buy = model.predict(df, timeframe=interval).get("buy_prob")
+            ai_text = f"  AI `{ai_buy*100:.0f}%`" if ai_buy is not None else ""
+            crypto_tag = " ₿" if is_crypto(symbol) else ""
+            flag_str = "  ·  ".join(flags)
+            interesting.append(
+                f"*{symbol}*{crypto_tag}  `${price:.2f}`  ·  MACD {macd_dir}  EMA {ema_dir}{ai_text}\n"
+                f"  {flag_str}"
+            )
+        except Exception:
+            continue
+
+    if interesting:
+        await update.message.reply_text(
+            f"{session_str}\n\n" + "\n\n".join(interesting),
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(
+            f"{session_str}\n\n✅ Nothing extreme right now — all RSI readings are neutral.\n"
+            f"Use `/scan SYMBOL` for a detailed view.",
+            parse_mode="Markdown",
+        )
 
 
 async def cmd_train(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1900,16 +2050,17 @@ async def post_init(app: Application) -> None:
 
     # Register commands so they appear in Telegram's "/" command list
     await app.bot.set_my_commands([
-        BotCommand("menu", "Show main menu"),
-        BotCommand("settings", "Language & experience level / زبان و سطح"),
-        BotCommand("status", "Open positions with live P&L"),
-        BotCommand("pnl", "Closed trade history"),
-        BotCommand("cancel", "Close a position manually"),
-        BotCommand("subscribe", "Get DM alerts for a symbol"),
+        BotCommand("menu",        "Show main menu"),
+        BotCommand("help",        "List all commands"),
+        BotCommand("settings",    "Language & experience level / زبان و سطح"),
+        BotCommand("status",      "Open positions with live P&L"),
+        BotCommand("pnl",         "Closed trade history"),
+        BotCommand("close",       "Close a position (tap or /close SYMBOL)"),
+        BotCommand("subscribe",   "Get DM alerts for a symbol"),
         BotCommand("unsubscribe", "Remove subscriptions"),
-        BotCommand("backtest", "2-year historical backtest"),
-        BotCommand("scan", "Live indicator snapshot"),
-        BotCommand("stats", "Signal accuracy stats"),
+        BotCommand("scan",        "Notable symbols, or /scan SYMBOL for detail"),
+        BotCommand("backtest",    "Historical backtest for a symbol"),
+        BotCommand("stats",       "Signal accuracy stats"),
     ])
 
     if ADMIN_CHAT_ID:
@@ -1945,9 +2096,11 @@ def main() -> None:
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     for cmd, fn in [
-        ("start", cmd_start), ("menu", cmd_menu), ("settings", cmd_settings),
+        ("start", cmd_start), ("menu", cmd_menu), ("help", cmd_help),
+        ("settings", cmd_settings),
         ("status", cmd_status), ("pnl", cmd_pnl),
-        ("cancel", cmd_cancel), ("stats", cmd_stats), ("scan", cmd_scan),
+        ("close", cmd_close), ("cancel", cmd_cancel),
+        ("stats", cmd_stats), ("scan", cmd_scan),
         ("train", cmd_train), ("test", cmd_test),
         ("subscribe", cmd_subscribe), ("unsubscribe", cmd_unsubscribe),
         ("backtest", cmd_backtest),
