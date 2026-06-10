@@ -617,6 +617,7 @@ _HTML = """<!DOCTYPE html>
     <!-- Sub-navigation -->
     <ul class="nav sub-tabs" id="learning-subtabs" role="tablist">
       <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#lt-health" role="tab">🩺 Health</button></li>
+      <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#lt-pipeline" role="tab">🔧 Pipeline</button></li>
       <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#lt-analytics" role="tab">📊 Analytics</button></li>
       <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#lt-log" role="tab">📋 Log</button></li>
     </ul>
@@ -661,6 +662,39 @@ _HTML = """<!DOCTYPE html>
         </div>
 
       </div><!-- lt-health -->
+
+      <!-- ── Pipeline sub-tab ── -->
+      <div class="tab-pane fade" id="lt-pipeline" role="tabpanel">
+
+        <div class="card p-3 mb-2">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <div class="section-head mb-0">Training Pipeline — Last Batch</div>
+            <button class="btn btn-sm" style="background:var(--surface2);color:var(--accent);border:1px solid var(--border)" onclick="refreshTrainingPipeline()">↻ Refresh</button>
+          </div>
+
+          <!-- Steps legend -->
+          <div class="d-flex flex-wrap gap-2 mb-3" style="font-size:.74rem">
+            <span style="color:var(--muted)">Pipeline steps:</span>
+            <span>1. Download</span><span style="color:var(--dim)">→</span>
+            <span>2. Features</span><span style="color:var(--dim)">→</span>
+            <span>3. Labels</span><span style="color:var(--dim)">→</span>
+            <span>4. CV Train</span><span style="color:var(--dim)">→</span>
+            <span>5. Calibrate</span><span style="color:var(--dim)">→</span>
+            <span>6. Prune Features</span><span style="color:var(--dim)">→</span>
+            <span>7. Meta Classifier</span><span style="color:var(--dim)">→</span>
+            <span>8. Save Model</span>
+          </div>
+
+          <div id="pipeline-job-info" style="font-size:.80rem;color:var(--muted);margin-bottom:12px"></div>
+          <div id="pipeline-symbols-grid" class="row g-2"></div>
+        </div>
+
+        <div class="card p-3">
+          <div class="section-head mb-2">Recent Training Jobs</div>
+          <div id="pipeline-job-history" style="max-height:300px;overflow-y:auto"></div>
+        </div>
+
+      </div>
 
       <!-- ── Analytics sub-tab ── -->
       <div class="tab-pane fade" id="lt-analytics" role="tabpanel">
@@ -789,169 +823,301 @@ _HTML = """<!DOCTYPE html>
   <!-- ── ADMIN TAB ─────────────────────────────────────────────────────── -->
   <div class="tab-pane fade" id="tab-admin">
 
-    <div class="row g-2 mb-3">
-      <div class="col-12">
-        <div class="card p-3" style="border-color:#a78bfa40">
-          <div class="section-head">🚀 ML Bootstrap — Pre-train from 2 Years of Historical Data</div>
-          <p class="small mb-2 text-muted">
-            Runs the signal engine on 2 years of hourly bars per symbol, labels each signal
-            as correct/incorrect from TP/SL outcomes, and trains the ML models.
-            Takes ~5–10 minutes. Progress is visible in the Learning tab.
-          </p>
-          <div class="d-flex gap-3 align-items-center flex-wrap">
-            <button class="btn" style="background:var(--surface2);color:var(--purple);border:1px solid var(--border);padding:8px 24px;font-size:.9rem"
-              onclick="adminBootstrap()">🚀 Run Bootstrap (All Symbols)</button>
-            <div id="bootstrap-msg" class="small text-muted"></div>
+    <!-- Settings sub-tab nav -->
+    <ul class="nav nav-pills mb-3 gap-1 flex-wrap" style="border-bottom:1px solid var(--border);padding-bottom:10px">
+      <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#st-system">System</button></li>
+      <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#st-trading">Trading</button></li>
+      <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#st-ai">AI / ML</button></li>
+      <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#st-sentiment">Sentiment</button></li>
+      <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#st-notifications">Notifications</button></li>
+      <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#st-symbols">Symbols</button></li>
+    </ul>
+
+    <div class="tab-content">
+
+      <!-- ── System sub-tab ── -->
+      <div class="tab-pane fade show active" id="st-system" role="tabpanel">
+        <div class="row g-3">
+          <div class="col-12">
+            <div class="card p-3" style="border-color:#a78bfa40">
+              <div class="section-head mb-1">ML Bootstrap</div>
+              <p class="small text-muted mb-2">Runs the signal engine on 2 years of hourly bars per symbol, labels outcomes, and trains ML models. Takes ~5–10 minutes.</p>
+              <div class="d-flex gap-3 align-items-center flex-wrap">
+                <button class="btn" style="background:var(--surface2);color:var(--purple);border:1px solid var(--border);padding:8px 24px;font-size:.9rem"
+                  onclick="adminBootstrap()">🚀 Run Bootstrap (All Symbols)</button>
+                <div id="bootstrap-msg" class="small text-muted"></div>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="card p-3">
+              <div class="section-head mb-2">Display</div>
+              <div class="mb-3">
+                <label class="small text-muted">Display Currency</label>
+                <select id="set-display_currency" class="form-control mt-1">
+                  <option value="USD">$ USD — US Dollar</option>
+                  <option value="EUR">€ EUR — Euro</option>
+                  <option value="GBP">£ GBP — British Pound</option>
+                  <option value="CHF">Fr CHF — Swiss Franc</option>
+                </select>
+                <div class="small mt-1 text-muted">Price, TP, SL in Telegram signals shown in this currency</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="card p-3">
+              <div class="section-head mb-2">Save</div>
+              <p class="small text-muted">Changes take effect on the next scan cycle without restarting the bot.</p>
+              <div class="d-flex gap-3 align-items-center">
+                <button class="btn" style="background:var(--accent);color:#0d0f18;border:none;padding:6px 20px;font-weight:600"
+                  onclick="saveSettings()">💾 Save All Settings</button>
+                <div id="settings-msg" class="small text-muted"></div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
-    </div>
 
-    <!-- AI Sentiment Settings -->
-    <div class="row g-2 mb-3">
-      <div class="col-12">
-        <div class="card p-3" style="border-color:#38bdf840">
-          <div class="section-head">🧠 AI Sentiment Settings</div>
-          <p class="small mb-2 text-muted">
-            Switch provider without restarting the bot — changes take effect on the next scan.
-          </p>
-          <div class="row g-3" id="settings-form">
-
-            <div class="col-md-4">
-              <label class="small text-muted">Sentiment Provider</label>
-              <select id="set-sentiment_provider" class="form-control mt-1">
-                <option value="disabled">Disabled (no sentiment)</option>
-                <option value="local_finbert">Local FinBERT (Docker sidecar)</option>
-                <option value="gemini">Gemini 1.5 Flash (free tier)</option>
-                <option value="claude">Claude API (cloud)</option>
-              </select>
-              <div class="small mt-1 text-muted">
-                Gemini: 1,500 free calls/day — switch without restart
+      <!-- ── Trading sub-tab ── -->
+      <div class="tab-pane fade" id="st-trading" role="tabpanel">
+        <div id="settings-form-hidden" style="display:none"></div>
+        <div class="row g-3">
+          <div class="col-md-4">
+            <div class="card p-3">
+              <div class="section-head mb-2">Risk Controls</div>
+              <div class="mb-3">
+                <label class="small text-muted">Performance Brake — Win Rate Threshold (%)</label>
+                <input type="number" id="set-perf_brake_wr_threshold" class="form-control mt-1"
+                  step="1" min="30" max="70" placeholder="42">
+                <div class="small mt-1 text-muted">Brake engages when rolling win rate falls below this</div>
+              </div>
+              <div class="mb-3">
+                <label class="small text-muted">Performance Brake — Lookback Signals</label>
+                <input type="number" id="set-perf_brake_lookback" class="form-control mt-1"
+                  step="5" min="10" max="200" placeholder="20">
+                <div class="small mt-1 text-muted">Number of resolved signals used to calculate rolling WR</div>
               </div>
             </div>
-
-            <div class="col-md-4">
-              <label class="small text-muted">News Provider</label>
-              <select id="set-news_provider" class="form-control mt-1">
-                <option value="disabled">Disabled</option>
-                <option value="finnhub">Finnhub (free tier)</option>
-              </select>
-            </div>
-
-            <div class="col-md-4">
-              <label class="small text-muted">Suppress Threshold (0.0–1.0)</label>
-              <input type="number" id="set-sentiment_suppress_threshold" class="form-control mt-1"
-                step="0.05" min="0" max="1" placeholder="0.35">
-              <div class="small mt-1 text-muted">
-                Sentiment score above this suppresses conflicting signal
-              </div>
-            </div>
-
-            <div class="col-md-4">
-              <label class="small text-muted">Finnhub API Key</label>
-              <input type="text" id="set-finnhub_api_key" class="form-control mt-1"
-                placeholder="Free key from finnhub.io">
-            </div>
-
-            <div class="col-md-4">
-              <label class="small text-muted">Gemini API Key</label>
-              <input type="password" id="set-gemini_api_key" class="form-control mt-1"
-                placeholder="AIza... (Google AI Studio, free tier)">
-            </div>
-
-            <div class="col-md-4">
-              <label class="small text-muted">Claude API Key</label>
-              <input type="password" id="set-claude_api_key" class="form-control mt-1"
-                placeholder="sk-ant-... (for claude provider)">
-            </div>
-
-            <div class="col-md-4">
-              <label class="small text-muted">FinBERT Service URL</label>
-              <input type="text" id="set-sentiment_local_url" class="form-control mt-1"
-                placeholder="http://finbert:5001">
-              <div class="small mt-1 text-muted">
-                Change this when deploying to a different host
-              </div>
-            </div>
-
-            <div class="col-md-4">
-              <label class="small text-muted">News Lookback (hours)</label>
-              <input type="number" id="set-news_lookback_hours" class="form-control mt-1"
-                step="1" min="1" max="48" placeholder="6">
-            </div>
-
-            <div class="col-md-4">
-              <label class="small text-muted">Outcome Notifications in DM</label>
-              <select id="set-outcome_notify_admin" class="form-control mt-1">
-                <option value="false">Disabled (no DM for outcomes)</option>
-                <option value="true">Enabled (send to admin DM)</option>
-              </select>
-              <div class="small mt-1 text-muted">Outcome results are always visible in the dashboard</div>
-            </div>
-
-            <div class="col-md-4">
-              <label class="small text-muted">Display Currency</label>
-              <select id="set-display_currency" class="form-control mt-1">
-                <option value="USD">$ USD — US Dollar</option>
-                <option value="EUR">€ EUR — Euro</option>
-                <option value="GBP">£ GBP — British Pound</option>
-                <option value="CHF">Fr CHF — Swiss Franc</option>
-              </select>
-              <div class="small mt-1 text-muted">Price, TP and SL in Telegram signals will be shown in this currency</div>
-            </div>
-
-
           </div>
-          <div class="d-flex gap-3 align-items-center mt-3">
-            <button class="btn" style="background:var(--surface2);color:var(--accent);border:1px solid var(--border);padding:6px 20px"
+          <div class="col-md-4">
+            <div class="card p-3">
+              <div class="section-head mb-2">Signal Thresholds</div>
+              <div class="mb-3">
+                <label class="small text-muted">Min RSI for BUY signal</label>
+                <input type="number" id="set-rsi_buy_max" class="form-control mt-1"
+                  step="1" min="10" max="60" placeholder="60">
+              </div>
+              <div class="mb-3">
+                <label class="small text-muted">Max RSI for SELL signal</label>
+                <input type="number" id="set-rsi_sell_min" class="form-control mt-1"
+                  step="1" min="40" max="90" placeholder="40">
+              </div>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <div class="card p-3">
+              <div class="section-head mb-2">Save</div>
+              <p class="small text-muted">Trading thresholds affect the next scan cycle immediately.</p>
+              <button class="btn" style="background:var(--accent);color:#0d0f18;border:none;padding:6px 20px;font-weight:600"
+                onclick="saveSettings()">💾 Save Settings</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── AI / ML sub-tab ── -->
+      <div class="tab-pane fade" id="st-ai" role="tabpanel">
+        <div class="row g-3">
+          <div class="col-md-6">
+            <div class="card p-3">
+              <div class="section-head mb-2">Model Training</div>
+              <div class="mb-3">
+                <label class="small text-muted">Min Outcomes Before Training</label>
+                <input type="number" id="set-ml_min_outcomes" class="form-control mt-1"
+                  step="5" min="10" max="500" placeholder="30">
+                <div class="small mt-1 text-muted">Symbol needs at least this many resolved outcomes before ML trains</div>
+              </div>
+              <div class="mb-3">
+                <label class="small text-muted">Meta-labeling Min Confidence</label>
+                <input type="number" id="set-meta_min_confidence" class="form-control mt-1"
+                  step="0.01" min="0" max="1" placeholder="0.55">
+                <div class="small mt-1 text-muted">Secondary classifier confidence threshold for STRONG signals</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="card p-3">
+              <div class="section-head mb-2">Feature Pruning</div>
+              <div class="mb-3">
+                <label class="small text-muted">Feature Importance Threshold</label>
+                <input type="number" id="set-feature_importance_threshold" class="form-control mt-1"
+                  step="0.001" min="0" max="0.1" placeholder="0.005">
+                <div class="small mt-1 text-muted">Features below this importance score are pruned per symbol</div>
+              </div>
+              <div class="mb-3">
+                <label class="small text-muted">Enable Sector ETF Features</label>
+                <select id="set-sector_etf_features" class="form-control mt-1">
+                  <option value="true">Enabled — use sector ETF relative strength</option>
+                  <option value="false">Disabled</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <div class="col-12 d-flex gap-3 align-items-center">
+            <button class="btn" style="background:var(--accent);color:#0d0f18;border:none;padding:6px 20px;font-weight:600"
               onclick="saveSettings()">💾 Save Settings</button>
-            <div id="settings-msg" class="small text-muted"></div>
-          </div>
-
-          <!-- Per-symbol sentiment status -->
-          <div class="mt-4">
-            <div class="section-head" style="font-size:.74rem;color:var(--muted)">Current Sentiment Cache</div>
-            <div id="sentiment-status" style="font-size:.78rem"></div>
+            <div class="small text-muted">ML changes take effect on the next training run</div>
           </div>
         </div>
       </div>
-    </div>
 
-    <div class="row g-2 mb-3">
-      <div class="col-md-6">
-        <div class="card p-3">
-          <div class="section-head">⚙️ Watched Symbols</div>
-          <p class="small mb-2 text-muted">
-            Changes take effect within 5 minutes.
-          </p>
-
-          <!-- Search input with autocomplete -->
-          <div class="position-relative mb-3" style="max-width:340px">
-            <div class="d-flex gap-2">
-              <input type="text" id="new-symbol" class="form-control"
-                placeholder="Search by name or ticker…"
-                autocomplete="off"
-                oninput="searchSymbol(this.value)"
-                onkeydown="if(event.key==='Enter'){addSymbol();event.preventDefault()}">
-              <button class="btn btn-add px-3" onclick="addSymbol()">+ Add</button>
+      <!-- ── Sentiment sub-tab ── -->
+      <div class="tab-pane fade" id="st-sentiment" role="tabpanel">
+        <div class="row g-3">
+          <div class="col-md-4">
+            <div class="card p-3">
+              <div class="section-head mb-2">Provider</div>
+              <div class="mb-3">
+                <label class="small text-muted">Sentiment Provider</label>
+                <select id="set-sentiment_provider" class="form-control mt-1">
+                  <option value="disabled">Disabled (no sentiment)</option>
+                  <option value="local_finbert">Local FinBERT (Docker sidecar)</option>
+                  <option value="gemini">Gemini 1.5 Flash (free tier)</option>
+                  <option value="claude">Claude API (cloud)</option>
+                </select>
+                <div class="small mt-1 text-muted">Gemini: 1,500 free calls/day — switch without restart</div>
+              </div>
+              <div class="mb-3">
+                <label class="small text-muted">News Provider</label>
+                <select id="set-news_provider" class="form-control mt-1">
+                  <option value="disabled">Disabled</option>
+                  <option value="finnhub">Finnhub (free tier)</option>
+                </select>
+              </div>
+              <div class="mb-3">
+                <label class="small text-muted">FinBERT Service URL</label>
+                <input type="text" id="set-sentiment_local_url" class="form-control mt-1"
+                  placeholder="http://finbert:5001">
+              </div>
             </div>
-            <div id="search-dropdown" class="position-absolute w-100 mt-1"
-              style="z-index:1000;display:none;background:var(--surface);border:1px solid var(--border);
-                     border-radius:6px;max-height:220px;overflow-y:auto"></div>
           </div>
-          <div id="add-msg" class="small mb-2" style="min-height:1.2em"></div>
-
-          <div id="symbol-list"></div>
+          <div class="col-md-4">
+            <div class="card p-3">
+              <div class="section-head mb-2">API Keys</div>
+              <div class="mb-3">
+                <label class="small text-muted">Finnhub API Key</label>
+                <input type="text" id="set-finnhub_api_key" class="form-control mt-1"
+                  placeholder="Free key from finnhub.io">
+              </div>
+              <div class="mb-3">
+                <label class="small text-muted">Gemini API Key</label>
+                <input type="password" id="set-gemini_api_key" class="form-control mt-1"
+                  placeholder="AIza... (Google AI Studio, free tier)">
+              </div>
+              <div class="mb-3">
+                <label class="small text-muted">Claude API Key</label>
+                <input type="password" id="set-claude_api_key" class="form-control mt-1"
+                  placeholder="sk-ant-... (for claude provider)">
+              </div>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <div class="card p-3">
+              <div class="section-head mb-2">Behavior</div>
+              <div class="mb-3">
+                <label class="small text-muted">Suppress Threshold (0.0–1.0)</label>
+                <input type="number" id="set-sentiment_suppress_threshold" class="form-control mt-1"
+                  step="0.05" min="0" max="1" placeholder="0.35">
+                <div class="small mt-1 text-muted">Sentiment score above this suppresses a conflicting signal</div>
+              </div>
+              <div class="mb-3">
+                <label class="small text-muted">News Lookback (hours)</label>
+                <input type="number" id="set-news_lookback_hours" class="form-control mt-1"
+                  step="1" min="1" max="48" placeholder="6">
+              </div>
+              <button class="btn" style="background:var(--accent);color:#0d0f18;border:none;padding:6px 20px;font-weight:600"
+                onclick="saveSettings()">💾 Save Settings</button>
+            </div>
+          </div>
+          <div class="col-12">
+            <div class="card p-3">
+              <div class="section-head mb-1" style="font-size:.74rem;color:var(--muted)">Current Sentiment Cache</div>
+              <div id="sentiment-status" style="font-size:.78rem"></div>
+            </div>
+          </div>
         </div>
       </div>
 
-      <div class="col-md-6">
-        <div class="card p-3">
-          <div class="section-head">📊 Symbol Signal Stats</div>
-          <div id="symbol-stats"></div>
+      <!-- ── Notifications sub-tab ── -->
+      <div class="tab-pane fade" id="st-notifications" role="tabpanel">
+        <div class="row g-3">
+          <div class="col-md-6">
+            <div class="card p-3">
+              <div class="section-head mb-2">Telegram Alerts</div>
+              <div class="mb-3">
+                <label class="small text-muted">Outcome Notifications in DM</label>
+                <select id="set-outcome_notify_admin" class="form-control mt-1">
+                  <option value="false">Disabled (no DM for outcomes)</option>
+                  <option value="true">Enabled (send outcome to admin DM)</option>
+                </select>
+                <div class="small mt-1 text-muted">Outcome results are always visible in the dashboard regardless</div>
+              </div>
+              <div class="mb-3">
+                <label class="small text-muted">Min Signal Strength to Notify</label>
+                <select id="set-notify_min_strength" class="form-control mt-1">
+                  <option value="RULE">All signals (RULE + AI + STRONG)</option>
+                  <option value="AI">AI + STRONG only</option>
+                  <option value="STRONG">STRONG only</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="card p-3">
+              <div class="section-head mb-2">Save</div>
+              <p class="small text-muted">Notification changes take effect on the next signal immediately.</p>
+              <button class="btn" style="background:var(--accent);color:#0d0f18;border:none;padding:6px 20px;font-weight:600"
+                onclick="saveSettings()">💾 Save Settings</button>
+              <div id="settings-msg" class="small text-muted mt-2"></div>
+            </div>
+          </div>
         </div>
       </div>
-    </div>
+
+      <!-- ── Symbols sub-tab ── -->
+      <div class="tab-pane fade" id="st-symbols" role="tabpanel">
+        <div class="row g-2">
+          <div class="col-md-6">
+            <div class="card p-3">
+              <div class="section-head">Watched Symbols</div>
+              <p class="small mb-2 text-muted">Changes take effect within 5 minutes.</p>
+              <div class="position-relative mb-3" style="max-width:340px">
+                <div class="d-flex gap-2">
+                  <input type="text" id="new-symbol" class="form-control"
+                    placeholder="Search by name or ticker…"
+                    autocomplete="off"
+                    oninput="searchSymbol(this.value)"
+                    onkeydown="if(event.key==='Enter'){addSymbol();event.preventDefault()}">
+                  <button class="btn btn-add px-3" onclick="addSymbol()">+ Add</button>
+                </div>
+                <div id="search-dropdown" class="position-absolute w-100 mt-1"
+                  style="z-index:1000;display:none;background:var(--surface);border:1px solid var(--border);
+                         border-radius:6px;max-height:220px;overflow-y:auto"></div>
+              </div>
+              <div id="add-msg" class="small mb-2" style="min-height:1.2em"></div>
+              <div id="symbol-list"></div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="card p-3">
+              <div class="section-head">Symbol Signal Stats</div>
+              <div id="symbol-stats"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /tab-content inner -->
   </div>
 
   </div><!-- tab-content -->
@@ -1420,11 +1586,11 @@ async function refreshSignalsTab() {
       </div>
       <div id="sig-detail-${idx}" style="display:none;border-top:1px solid var(--border);padding:14px">
         <div class="row g-3">
-          <div class="col-md-5">
+          <div class="col-md-4">
             <div style="font-size:.76rem;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em">Signal Reasons</div>
             ${reasonsList}
           </div>
-          <div class="col-md-4">
+          <div class="col-md-3">
             <div style="font-size:.76rem;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em">Trade Details</div>
             <div style="font-size:.78rem;line-height:1.8">
               Entry: <span style="color:var(--text)">${price}</span><br>
@@ -1434,7 +1600,7 @@ async function refreshSignalsTab() {
               RSI: <span style="color:var(--text)">${s.rsi ? Number(s.rsi).toFixed(1) : '—'}</span>
             </div>
           </div>
-          <div class="col-md-3">
+          <div class="col-md-2">
             <div style="font-size:.76rem;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em">Outcome</div>
             <div style="font-size:.78rem;line-height:1.8">
               Result: ${outBadge}<br>
@@ -1443,6 +1609,10 @@ async function refreshSignalsTab() {
               MFE: <span style="color:var(--green)">${mfe}</span><br>
               MAE: <span style="color:var(--red)">${mae}</span>
             </div>
+          </div>
+          <div class="col-md-3">
+            <div style="font-size:.76rem;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em">Scan Pipeline</div>
+            <div id="sig-pipeline-${idx}" style="font-size:.72rem;color:var(--dim)">loading…</div>
           </div>
         </div>
       </div>
@@ -1457,6 +1627,60 @@ function toggleSigDetail(idx) {
   const open = detail.style.display !== 'none';
   detail.style.display = open ? 'none' : '';
   if (chevron) chevron.textContent = open ? '▼ expand' : '▲ collapse';
+  if (!open && _allSignals[idx]) loadSigPipeline(idx, _allSignals[idx]);
+}
+
+async function loadSigPipeline(idx, sig) {
+  const el = document.getElementById(`sig-pipeline-${idx}`);
+  if (!el || el.dataset.loaded) return;
+  el.dataset.loaded = '1';
+  let traces = [];
+  try { traces = await fetch(`/api/pipeline/${encodeURIComponent(sig.symbol)}`).then(r=>r.json()); } catch(e){}
+
+  // Find closest trace by time (within 10 minutes of the signal)
+  const sigTs = new Date(sig.sent_at + (sig.sent_at.endsWith('Z')?'':'Z')).getTime();
+  let t = null;
+  let bestDiff = Infinity;
+  for (const tr of traces) {
+    const tTs = new Date(tr.scanned_at + (tr.scanned_at.endsWith('Z')?'':'Z')).getTime();
+    const diff = Math.abs(tTs - sigTs);
+    if (diff < bestDiff && diff < 600000) { bestDiff = diff; t = tr; }
+  }
+
+  if (!t) {
+    el.innerHTML = '<span style="color:var(--dim)">No trace recorded for this scan.</span>';
+    return;
+  }
+
+  function node(label, ok, detail, suppressed) {
+    const color = suppressed ? 'var(--red)' : ok ? 'var(--green)' : 'var(--dim)';
+    const dot = `<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${color};flex-shrink:0;margin-top:2px"></span>`;
+    const txt = `<span style="color:${ok||suppressed?'var(--text)':'var(--dim)'}">${label}</span>${detail?`<span style="color:var(--muted);margin-left:4px">${detail}</span>`:''}`;
+    const line = `<div style="width:1px;height:8px;background:var(--border);margin-left:4px"></div>`;
+    return `<div class="d-flex align-items-start gap-2">${dot}<div style="line-height:1.3">${txt}</div></div>${line}`;
+  }
+
+  const mlBuy  = t.ml_buy_prob  != null ? (t.ml_buy_prob*100).toFixed(0)+'%'  : null;
+  const mlSell = t.ml_sell_prob != null ? (t.ml_sell_prob*100).toFixed(0)+'%' : null;
+  const mlDetail = mlBuy ? `B:${mlBuy} S:${mlSell}` : 'no model';
+  const metaDetail = t.meta_conf != null ? (t.meta_conf*100).toFixed(0)+'%' : '—';
+  const sentDetail = t.sentiment_score != null ? `${Number(t.sentiment_score).toFixed(2)} → ${Number(t.sentiment_adj||0).toFixed(2)}` : '—';
+  const finalColor = t.suppressed ? 'var(--red)' : 'var(--green)';
+  const finalText  = t.suppressed
+    ? `<span style="color:var(--red)">suppressed</span> <span style="color:var(--muted);font-size:.70rem">${t.suppress_reason||''}</span>`
+    : `<span style="color:var(--green)">${t.final_action||'signal'}</span>`;
+
+  el.innerHTML = `
+    ${node('Data OK', !!t.data_ok, null, false)}
+    ${node('Features', t.features_count > 0, t.features_count ? t.features_count+' feats' : null, false)}
+    ${node('Rule Engine', !!t.rule_signal, t.rule_signal||'no signal', false)}
+    ${node('ML Engine', mlBuy != null, mlDetail, false)}
+    ${node('Meta Conf', t.meta_conf != null, metaDetail, false)}
+    ${node('Sentiment', t.sentiment_score != null, sentDetail, false)}
+    <div class="d-flex align-items-start gap-2">
+      <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${finalColor};flex-shrink:0;margin-top:2px"></span>
+      <div style="line-height:1.3">${finalText}</div>
+    </div>`;
 }
 
 // ── ML ────────────────────────────────────────────────────────────────────────
@@ -2184,6 +2408,115 @@ async function refreshActivity() {
     : '<div class="suggestion-item sug-ok">✅ All models look healthy — no issues detected.</div>';
 }
 
+// ── Training Pipeline visualization ──────────────────────────────────────────
+async function refreshTrainingPipeline() {
+  const [jobsData, actData] = await Promise.all([
+    fetch('/api/training-jobs').then(r=>r.json()),
+    fetch('/api/ml-activity').then(r=>r.json()),
+  ]);
+
+  const running = jobsData.running;
+  const recent = jobsData.recent || [];
+  const health = actData.symbol_health || {};
+
+  // Job info banner
+  const jobInfo = document.getElementById('pipeline-job-info');
+  if (running) {
+    const pct = running.total_symbols > 0 ? Math.round(running.done_symbols / running.total_symbols * 100) : 0;
+    const cur = running.current_symbol ? ` — currently: ${running.current_symbol}` : '';
+    jobInfo.innerHTML = `
+      <div style="color:#a78bfa;font-weight:600;margin-bottom:6px">
+        ${running.job_type} running${cur} · ${pct}% (${running.done_symbols}/${running.total_symbols})
+      </div>
+      <div class="progress mb-2" style="height:6px">
+        <div class="progress-bar" style="width:${pct}%;background:#a78bfa"></div>
+      </div>`;
+  } else {
+    const lastJob = recent[0];
+    if (lastJob) {
+      const dur = lastJob.completed_at && lastJob.started_at
+        ? Math.round((new Date(lastJob.completed_at+'Z') - new Date(lastJob.started_at+'Z'))/1000)+'s' : '—';
+      const statusColor = {done:'var(--green)',failed:'var(--red)'}[lastJob.status]||'var(--muted)';
+      let summary = '';
+      try { const s = lastJob.result_summary ? JSON.parse(lastJob.result_summary) : null;
+        if (s) summary = ` · ${s.trained}/${s.total} trained, avg WR ${s.avg_win_rate}%`; }
+      catch(e){}
+      jobInfo.innerHTML = `<span style="color:${statusColor}">Last: ${lastJob.job_type} ${lastJob.status}</span>
+        <span style="color:var(--muted);margin-left:8px">${new Date(lastJob.started_at+'Z').toLocaleString()}</span>
+        <span style="color:var(--dim);margin-left:8px">${dur}${summary}</span>`;
+    } else {
+      jobInfo.innerHTML = '<span style="color:var(--dim)">No training jobs run yet. Run Bootstrap from Action Center.</span>';
+    }
+  }
+
+  // Per-symbol pipeline cards
+  const trainMap = {};
+  (actData.training_events || []).forEach(e => {
+    if (!trainMap[e.symbol]) trainMap[e.symbol] = e;
+  });
+  const allSymbols = Object.keys(health).length ? Object.keys(health) : Object.keys(trainMap);
+
+  const pipelineSteps = ['Download','Features','Labels','CV Train','Calibrate','Prune','Meta','Save'];
+
+  document.getElementById('pipeline-symbols-grid').innerHTML = allSymbols.slice(0, 60).map(sym => {
+    const h = health[sym] || {};
+    const t = trainMap[sym];
+    const hasModel = !!t;
+    const wr = h.all_acc || (t?.win_rate ?? null);
+    const wrColor = wr === null ? 'var(--muted)' : (wr >= 55 ? 'var(--green)' : wr >= 50 ? 'var(--yellow)' : 'var(--red)');
+    const samples = t?.train_samples ?? 0;
+    const outcomes = t?.outcome_samples ?? 0;
+    const age = h.last_trained || (t?.trained_at);
+    const ageStr = age ? modelAge(age) : 'never';
+
+    // Simulate step status: if model trained, show all steps green; else show partial
+    const stepDots = pipelineSteps.map((step, i) => {
+      const done = hasModel;
+      const color = done ? 'var(--green)' : (i === 0 ? 'var(--yellow)' : 'var(--dim)');
+      const title = done ? `${step}: done` : `${step}: pending`;
+      return `<span title="${title}" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};margin:1px"></span>`;
+    }).join('');
+
+    return `<div class="col-6 col-md-4 col-lg-3 col-xl-2">
+      <div class="health-card" style="font-size:.74rem">
+        <div class="d-flex justify-content-between align-items-center mb-1">
+          <span class="sym-tag" style="font-size:.70rem">${sym}</span>
+          <span style="color:${wrColor};font-weight:600">${wr !== null ? wr+'%' : '—'}</span>
+        </div>
+        <div class="mb-1">${stepDots}</div>
+        <div style="color:#555;font-size:.68rem">
+          ${samples} samples · ${outcomes} outcomes<br>
+          ${ageStr}
+        </div>
+      </div>
+    </div>`;
+  }).join('') || '<div class="col-12 text-muted">No training data yet.</div>';
+
+  // Job history
+  const jobColors = {done:'#4ade80', failed:'#f87171', running:'#a78bfa'};
+  document.getElementById('pipeline-job-history').innerHTML = recent.length
+    ? recent.map(j => {
+        const color = jobColors[j.status] || '#8b8fa8';
+        const dur = j.completed_at && j.started_at
+          ? Math.round((new Date(j.completed_at+'Z') - new Date(j.started_at+'Z'))/1000)+'s' : '—';
+        let summary = '';
+        try { const s = j.result_summary ? JSON.parse(j.result_summary) : null;
+          if (s) summary = ` · <span style="color:#e0e0e0">${s.trained}/${s.total}</span> · <span style="color:#fbbf24">avg ${s.avg_win_rate}% WR</span>`; } catch(e){}
+        return `<div class="event-row mb-1" style="border-left-color:${color}">
+          <div class="d-flex justify-content-between">
+            <span>
+              <span style="color:${color};font-weight:600">${j.job_type}</span>
+              <span style="color:#8b8fa8;font-size:.76rem;margin-left:6px">${j.done_symbols}/${j.total_symbols} symbols</span>
+              ${summary}
+            </span>
+            <span style="color:#555;font-size:.74rem">${new Date(j.started_at+'Z').toLocaleString()} · ${dur}</span>
+          </div>
+          ${j.note ? `<div style="color:#555;font-size:.72rem;margin-top:2px">${j.note}</div>` : ''}
+        </div>`;
+      }).join('')
+    : '<div style="color:#555;font-size:.85rem">No training jobs run yet.</div>';
+}
+
 // ── Training jobs ─────────────────────────────────────────────────────────────
 let _jobPollTimer = null;
 
@@ -2370,6 +2703,9 @@ document.querySelectorAll('[data-bs-target="#tab-ml"]').forEach(el =>
 );
 document.querySelectorAll('[data-bs-target="#tab-activity"]').forEach(el =>
   el.addEventListener('shown.bs.tab', () => { refreshActivity(); refreshJobs(); })
+);
+document.querySelectorAll('[data-bs-target="#lt-pipeline"]').forEach(el =>
+  el.addEventListener('shown.bs.tab', () => refreshTrainingPipeline())
 );
 document.querySelectorAll('[data-bs-target="#lt-analytics"]').forEach(el =>
   el.addEventListener('shown.bs.tab', () => {
