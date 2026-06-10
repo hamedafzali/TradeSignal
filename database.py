@@ -1508,6 +1508,76 @@ def get_pipeline_trace(symbol: str, limit: int = 10) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def get_event_timeline(limit: int = 100, event_types: list[str] | None = None) -> list[dict]:
+    """
+    Unified chronological event feed across all system activity.
+    event_types filter: 'signal', 'outcome', 'train', 'cycle', 'action', 'scan'
+    """
+    all_types = event_types or ['signal', 'outcome', 'train', 'cycle', 'action', 'scan']
+    events: list[dict] = []
+
+    with _conn() as conn:
+        if 'signal' in all_types:
+            rows = conn.execute("""
+                SELECT 'signal' AS type, sent_at AS ts,
+                       symbol, action, strength, price, ai_confidence, outcome, regime
+                FROM signals ORDER BY sent_at DESC LIMIT ?
+            """, (limit,)).fetchall()
+            events.extend(dict(r) for r in rows)
+
+        if 'outcome' in all_types:
+            rows = conn.execute("""
+                SELECT 'outcome' AS type, outcome_at AS ts,
+                       symbol, action, outcome, resolution_reason,
+                       max_favorable_pct, max_adverse_pct, resolution_minutes
+                FROM signals
+                WHERE outcome != 'pending' AND outcome_at IS NOT NULL
+                ORDER BY outcome_at DESC LIMIT ?
+            """, (limit,)).fetchall()
+            events.extend(dict(r) for r in rows)
+
+        if 'train' in all_types:
+            rows = conn.execute("""
+                SELECT 'train' AS type, trained_at AS ts,
+                       symbol, train_samples, outcome_samples, trigger, win_rate,
+                       correct_count, incorrect_count
+                FROM ml_training_log ORDER BY trained_at DESC LIMIT ?
+            """, (limit,)).fetchall()
+            events.extend(dict(r) for r in rows)
+
+        if 'cycle' in all_types:
+            rows = conn.execute("""
+                SELECT 'cycle' AS type, checked_at AS ts,
+                       symbol, retrain_needed, retrained,
+                       resolved_outcomes, new_outcomes, note
+                FROM ml_cycle_log ORDER BY checked_at DESC LIMIT ?
+            """, (limit,)).fetchall()
+            events.extend(dict(r) for r in rows)
+
+        if 'action' in all_types:
+            rows = conn.execute("""
+                SELECT 'action' AS type, requested_at AS ts,
+                       action, symbol, status, result_note, requested_by
+                FROM action_requests ORDER BY requested_at DESC LIMIT ?
+            """, (limit,)).fetchall()
+            events.extend(dict(r) for r in rows)
+
+        if 'scan' in all_types:
+            rows = conn.execute("""
+                SELECT 'scan' AS type, scanned_at AS ts,
+                       symbols_total, symbols_scanned, symbols_skipped_market,
+                       signals_generated, scan_duration_ms, regime, perf_brake_engaged
+                FROM scan_log ORDER BY scanned_at DESC LIMIT ?
+            """, (limit,)).fetchall()
+            events.extend(dict(r) for r in rows)
+
+    # Sort all events by timestamp descending, return top `limit`
+    def _ts(e: dict) -> str:
+        return e.get("ts") or ""
+    events.sort(key=_ts, reverse=True)
+    return events[:limit]
+
+
 def log_wf_result(symbol: str, result: dict) -> None:
     with _conn() as conn:
         conn.execute("""

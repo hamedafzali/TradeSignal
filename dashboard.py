@@ -12,7 +12,7 @@ from database import (
     get_all_settings, set_setting, get_all_sentiment_cache,
     set_symbol_market, get_accuracy_by_direction, get_wf_results,
     get_rolling_performance, get_equity_curve, get_regime_attribution,
-    get_recent_scans, get_last_scan, get_pipeline_trace,
+    get_recent_scans, get_last_scan, get_pipeline_trace, get_event_timeline,
 )
 
 app = Flask(__name__)
@@ -241,6 +241,7 @@ _HTML = """<!DOCTYPE html>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-ml">ML</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-activity">Learning</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-performance">Performance</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-timeline">Timeline</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-admin">Admin</button></li>
   </ul>
 
@@ -730,6 +731,32 @@ _HTML = """<!DOCTYPE html>
         </div>
       </div>
     </div>
+  </div>
+
+  <!-- ── EVENT TIMELINE TAB ───────────────────────────────────────────── -->
+  <div class="tab-pane fade" id="tab-timeline">
+
+    <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+      <div class="d-flex gap-2 flex-wrap">
+        <label style="font-size:.78rem;color:var(--muted);align-self:center">Filter:</label>
+        <label class="d-flex align-items-center gap-1" style="font-size:.78rem;cursor:pointer"><input type="checkbox" id="tl-type-signal" checked onchange="refreshTimeline()"> Signals</label>
+        <label class="d-flex align-items-center gap-1" style="font-size:.78rem;cursor:pointer"><input type="checkbox" id="tl-type-outcome" checked onchange="refreshTimeline()"> Outcomes</label>
+        <label class="d-flex align-items-center gap-1" style="font-size:.78rem;cursor:pointer"><input type="checkbox" id="tl-type-train" checked onchange="refreshTimeline()"> Training</label>
+        <label class="d-flex align-items-center gap-1" style="font-size:.78rem;cursor:pointer"><input type="checkbox" id="tl-type-scan" checked onchange="refreshTimeline()"> Scans</label>
+        <label class="d-flex align-items-center gap-1" style="font-size:.78rem;cursor:pointer"><input type="checkbox" id="tl-type-action" onchange="refreshTimeline()"> Actions</label>
+      </div>
+      <div class="d-flex gap-2 align-items-center">
+        <select id="tl-limit" class="form-control" style="max-width:110px" onchange="refreshTimeline()">
+          <option value="50">Last 50</option>
+          <option value="100" selected>Last 100</option>
+          <option value="200">Last 200</option>
+        </select>
+        <button class="btn btn-sm" style="background:var(--surface2);color:var(--accent);border:1px solid var(--border)" onclick="refreshTimeline()">↻ Refresh</button>
+      </div>
+    </div>
+
+    <div id="timeline-feed" style="max-height:76vh;overflow-y:auto"></div>
+
   </div>
 
   <!-- ── ADMIN TAB ─────────────────────────────────────────────────────── -->
@@ -2139,6 +2166,95 @@ async function refreshJobs() {
     : '<div style="color:#555;font-size:.85rem">No training jobs run yet. Click "Run Bootstrap" to pre-train models from 2 years of historical data.</div>';
 }
 
+// ── Event Timeline ────────────────────────────────────────────────────────────
+async function refreshTimeline() {
+  const types = [];
+  if (document.getElementById('tl-type-signal')?.checked)  types.push('signal');
+  if (document.getElementById('tl-type-outcome')?.checked) types.push('outcome');
+  if (document.getElementById('tl-type-train')?.checked)   types.push('train');
+  if (document.getElementById('tl-type-scan')?.checked)    types.push('scan');
+  if (document.getElementById('tl-type-action')?.checked)  types.push('action');
+  const limit = document.getElementById('tl-limit')?.value || '100';
+  const params = new URLSearchParams({limit, types: types.join(',')});
+  const events = await fetch('/api/timeline?'+params).then(r=>r.json());
+
+  const container = document.getElementById('timeline-feed');
+  if (!events.length) {
+    container.innerHTML = '<div class="text-muted text-center py-4">No events yet.</div>';
+    return;
+  }
+
+  const typeConfig = {
+    signal:  {icon:'📡', color:'var(--accent)',  label:'Signal'},
+    outcome: {icon:'📬', color:'var(--green)',    label:'Outcome'},
+    train:   {icon:'🧠', color:'var(--purple)',   label:'Train'},
+    cycle:   {icon:'🔄', color:'var(--muted)',    label:'Cycle'},
+    action:  {icon:'🎛',  color:'var(--yellow)',  label:'Action'},
+    scan:    {icon:'🔍', color:'var(--dim)',       label:'Scan'},
+  };
+
+  const reasonMap = {
+    tp_hit:'TP Hit', sl_hit:'SL Hit', both_hit_same_candle:'Both Hit',
+    timeout_no_hit:'Timed Out', threshold_up:'Price Up', threshold_down:'Price Down',
+    threshold_flat:'Flat', unknown:'Unknown',
+  };
+
+  container.innerHTML = events.map(e => {
+    const cfg = typeConfig[e.type] || {icon:'•', color:'var(--muted)', label: e.type};
+    const tsStr = e.ts ? new Date(e.ts+'Z').toLocaleString() : '—';
+    let detail = '';
+
+    if (e.type === 'signal') {
+      const actColor = e.action === 'BUY' ? 'var(--accent)' : 'var(--pink)';
+      const outcomeEmoji = {correct:'✅',incorrect:'❌',neutral:'➖',pending:'⏳'}[e.outcome]||'';
+      detail = `<span style="color:${actColor};font-weight:600">${e.action}</span>
+        <span class="sym-tag ms-1">${e.symbol}</span>
+        <span class="ms-2" style="color:var(--muted);font-size:.72rem">${e.strength||'RULE'}</span>
+        ${e.ai_confidence ? `<span class="ms-2" style="color:var(--purple);font-size:.72rem">AI ${(e.ai_confidence*100).toFixed(0)}%</span>` : ''}
+        ${outcomeEmoji ? `<span class="ms-2">${outcomeEmoji}</span>` : ''}
+        ${e.regime ? `<span class="ms-2" style="color:var(--muted);font-size:.72rem">${e.regime}</span>` : ''}`;
+    } else if (e.type === 'outcome') {
+      const outcomeColor = {correct:'var(--green)',incorrect:'var(--red)',neutral:'var(--yellow)'}[e.outcome]||'var(--muted)';
+      const reason = reasonMap[e.resolution_reason] || (e.resolution_reason||'');
+      detail = `<span class="sym-tag">${e.symbol}</span>
+        <span style="color:${outcomeColor};font-weight:600;margin-left:8px">${(e.outcome||'').toUpperCase()}</span>
+        <span style="color:var(--muted);font-size:.72rem;margin-left:8px">${reason}</span>
+        ${e.max_favorable_pct != null ? `<span style="color:var(--green);font-size:.72rem;margin-left:8px">MFE +${Number(e.max_favorable_pct).toFixed(2)}%</span>` : ''}
+        ${e.resolution_minutes != null ? `<span style="color:var(--dim);font-size:.72rem;margin-left:8px">${Math.round(e.resolution_minutes)}min</span>` : ''}`;
+    } else if (e.type === 'train') {
+      const wrColor = e.win_rate >= 55 ? 'var(--green)' : e.win_rate >= 50 ? 'var(--yellow)' : 'var(--red)';
+      const triggerLabels = {bootstrap:'🚀',outcomes:'⚡',time:'⏱',manual:'🖱'};
+      detail = `${triggerLabels[e.trigger]||'🔄'} <span class="sym-tag">${e.symbol}</span>
+        <span style="color:var(--muted);font-size:.72rem;margin-left:8px">${e.train_samples} samples</span>
+        ${e.win_rate != null ? `<span style="color:${wrColor};font-size:.72rem;margin-left:8px">WR ${e.win_rate}%</span>` : ''}
+        ${e.outcome_samples ? `<span style="color:var(--yellow);font-size:.72rem;margin-left:8px">${e.outcome_samples} outcomes blended</span>` : ''}`;
+    } else if (e.type === 'scan') {
+      const sigColor = e.signals_generated > 0 ? 'var(--green)' : 'var(--muted)';
+      const dur = e.scan_duration_ms != null ? (e.scan_duration_ms > 1000 ? (e.scan_duration_ms/1000).toFixed(1)+'s' : Math.round(e.scan_duration_ms)+'ms') : '';
+      detail = `<span style="color:var(--muted)">${e.symbols_scanned||0}/${e.symbols_total||0} symbols</span>
+        <span style="color:${sigColor};font-weight:600;margin-left:8px">${e.signals_generated||0} signals</span>
+        ${e.symbols_skipped_market ? `<span style="color:var(--dim);font-size:.72rem;margin-left:8px">${e.symbols_skipped_market} skipped</span>` : ''}
+        ${dur ? `<span style="color:var(--dim);font-size:.72rem;margin-left:8px">${dur}</span>` : ''}
+        ${e.regime ? `<span style="color:var(--muted);font-size:.72rem;margin-left:8px">${e.regime}</span>` : ''}`;
+    } else if (e.type === 'action') {
+      const statusColor = {completed:'var(--green)',failed:'var(--red)',pending:'var(--yellow)'}[e.status]||'var(--muted)';
+      detail = `<span style="color:var(--text)">${e.action}</span>
+        ${e.symbol ? `<span class="sym-tag ms-1">${e.symbol}</span>` : ''}
+        <span style="color:${statusColor};font-size:.72rem;margin-left:8px">${e.status}</span>
+        ${e.result_note ? `<span style="color:var(--dim);font-size:.72rem;margin-left:8px">${e.result_note.slice(0,60)}</span>` : ''}`;
+    }
+
+    return `<div class="event-row mb-1 d-flex align-items-start gap-2" style="border-left-color:${cfg.color}">
+      <span style="font-size:.88rem;flex-shrink:0">${cfg.icon}</span>
+      <div style="flex:1;min-width:0">
+        <span style="color:${cfg.color};font-size:.70rem;text-transform:uppercase;letter-spacing:.07em;font-weight:600">${cfg.label}</span>
+        <span style="margin-left:8px;font-size:.78rem">${detail}</span>
+      </div>
+      <span style="color:var(--dim);font-size:.70rem;flex-shrink:0;white-space:nowrap">${tsStr}</span>
+    </div>`;
+  }).join('');
+}
+
 // ── Theme ─────────────────────────────────────────────────────────────────────
 function toggleTheme() {
   const current = document.documentElement.getAttribute('data-theme') || 'dark';
@@ -2170,6 +2286,9 @@ document.querySelectorAll('[data-bs-target="#tab-overview"]').forEach(el =>
 );
 document.querySelectorAll('[data-bs-target="#tab-signals"]').forEach(el =>
   el.addEventListener('shown.bs.tab', () => { _allSignals = []; refreshSignalsTab(); })
+);
+document.querySelectorAll('[data-bs-target="#tab-timeline"]').forEach(el =>
+  el.addEventListener('shown.bs.tab', () => refreshTimeline())
 );
 document.querySelectorAll('[data-bs-target="#tab-ml"]').forEach(el =>
   el.addEventListener('shown.bs.tab', () => refreshML())
@@ -2592,6 +2711,14 @@ def api_pipeline_trace(symbol):
 def api_scan_log():
     limit = int(request.args.get("limit", 50))
     return jsonify(get_recent_scans(limit))
+
+
+@app.route("/api/timeline")
+def api_timeline():
+    limit = int(request.args.get("limit", 100))
+    types_raw = request.args.get("types", "")
+    types = [t.strip() for t in types_raw.split(",") if t.strip()] or None
+    return jsonify(get_event_timeline(limit=limit, event_types=types))
 
 
 if __name__ == "__main__":
