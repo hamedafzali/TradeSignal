@@ -10,13 +10,41 @@ os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 @contextmanager
 def _conn():
-    conn = sqlite3.connect(DB_PATH)
+    # WAL allows the dashboard to read while the bot writes; busy_timeout makes
+    # writers wait instead of raising "database is locked".
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
     try:
         yield conn
         conn.commit()
     finally:
         conn.close()
+
+
+def backup_db(keep: int = 7) -> str:
+    """Online backup via SQLite's backup API (safe under WAL, no lock needed).
+    Writes data/backups/trading-YYYYMMDD.db and prunes to the newest `keep`."""
+    backup_dir = os.path.join(os.path.dirname(DB_PATH), "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    dest_path = os.path.join(
+        backup_dir, f"trading-{datetime.utcnow().strftime('%Y%m%d')}.db"
+    )
+    src = sqlite3.connect(DB_PATH, timeout=10)
+    dest = sqlite3.connect(dest_path)
+    try:
+        src.backup(dest)
+    finally:
+        dest.close()
+        src.close()
+    backups = sorted(
+        f for f in os.listdir(backup_dir)
+        if f.startswith("trading-") and f.endswith(".db")
+    )
+    for old in backups[:-keep]:
+        os.remove(os.path.join(backup_dir, old))
+    return dest_path
 
 
 def init_db() -> None:

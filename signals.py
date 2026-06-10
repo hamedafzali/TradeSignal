@@ -28,6 +28,37 @@ def is_crypto(symbol: str) -> bool:
     return symbol.upper() in _CRYPTO_SYMBOLS or symbol.upper().endswith("-USD")
 
 
+def fetch_ohlc(symbol: str, retries: int = 3, **yf_kwargs) -> pd.DataFrame | None:
+    """
+    Hardened yf.download wrapper: retry with backoff on transient empties,
+    flatten MultiIndex columns, and sanity-check the result. Returns None when
+    no trustworthy data is available — callers must treat None as "don't act",
+    never as "price is 0". Used on label-critical paths (outcome resolution):
+    a transient yfinance failure must delay an outcome, not mislabel it.
+    """
+    import time as _t
+    yf_kwargs.setdefault("progress", False)
+    yf_kwargs.setdefault("auto_adjust", True)
+    for attempt in range(retries):
+        try:
+            df = yf.download(symbol, **yf_kwargs)
+            if df is None or df.empty:
+                raise ValueError("empty frame")
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(1)
+            close = df["Close"].squeeze()
+            last = float(close.iloc[-1])
+            if not (last > 0) or not df.index.is_monotonic_increasing:
+                raise ValueError(f"implausible data (last={last})")
+            return df
+        except Exception as exc:
+            if attempt < retries - 1:
+                _t.sleep(2 ** attempt)  # 1s, 2s
+            else:
+                print(f"[fetch_ohlc] {symbol} failed after {retries} attempts: {exc}")
+    return None
+
+
 def detect_market(symbol: str) -> str:
     """Auto-detect market from symbol suffix — crypto, xetra (European), or us."""
     s = symbol.upper()
@@ -496,6 +527,17 @@ def combine_signals(rule_sig: dict | None, ml_result: dict,
         sig["ai_confidence"] = buy_prob if rule_action == "BUY" else sell_prob
         sig["meta_confidence"] = (meta_conf_buy if rule_action == "BUY" else meta_conf_sell)
     elif ai_signal:
+        # Shadow mode (default ON): ML predictions are logged on every signal but
+        # cannot create signals on their own until calibration is demonstrated on
+        # live outcomes. Disable via dashboard setting ml_shadow_mode=false.
+        try:
+            from database import get_setting as _gs
+            shadow = _gs("ml_shadow_mode", "true") == "true"
+        except Exception:
+            shadow = True
+        if shadow:
+            print(f"[signals] shadow mode: AI-only {ai_signal} {symbol} logged, not fired")
+            return None
         prob = buy_prob if ai_signal == "BUY" else sell_prob
         if prob is not None and prob >= 0.70:
             # RSI gate: AI-only BUY must not be overbought; AI-only SELL must not be oversold

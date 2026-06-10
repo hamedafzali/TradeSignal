@@ -70,6 +70,7 @@ from sentiment import get_sentiment, refresh_cache as refresh_sentiment
 from signals import (
     _atr, _macd, _rsi,
     combine_signals,
+    fetch_ohlc,
     get_1h_bias,
     get_signal,
     is_crypto,
@@ -149,6 +150,9 @@ CET = ZoneInfo("Europe/Berlin")
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
+# httpx logs every getUpdates long-poll at INFO (~1 line/10s, 100K+ lines/week)
+# — that flood is what made `docker logs` appear silent. Warnings still surface.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 models: dict[str, StockModel] = {s: StockModel(s) for s in SYMBOLS}
 BOT_USERNAME = ""
@@ -372,19 +376,16 @@ def _resolve_signal_outcome(sig: dict) -> dict | None:
     pad = timedelta(hours=2) if interval == "1h" else timedelta(minutes=30)
     end = now + timedelta(minutes=5)
 
-    df = yf.download(
+    # Hardened fetch: outcome labels feed model training — a transient yfinance
+    # failure must delay resolution (return None → stay pending), never mislabel.
+    df = fetch_ohlc(
         sig["symbol"],
         start=sent_at - pad,
         end=end,
         interval=interval,
-        progress=False,
-        auto_adjust=True,
     )
-    if df.empty:
+    if df is None or df.empty:
         return None
-
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.droplevel(1)
 
     if df.index.tz is None:
         df.index = df.index.tz_localize("UTC")
@@ -495,8 +496,9 @@ async def _ensure_models_trained(bot=None) -> None:
             outcome_data = get_outcome_training_data(symbol=symbol)
             ok = model.train(outcome_data=outcome_data)
             if ok:
-                trigger = "outcomes" if len(outcome_data) >= 3 else "time"
-                trained_lines.append(_train_summary_line(symbol, len(outcome_data), trigger))
+                blended = getattr(model, "last_blend_count", 0)
+                trigger = "outcomes" if blended >= 3 else "time"
+                trained_lines.append(_train_summary_line(symbol, blended, trigger))
     if trained_lines and bot and ADMIN_CHAT_ID:
         try:
             await bot.send_message(
@@ -575,6 +577,25 @@ async def refresh_sentiment_cache(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.debug(f"[sentiment] refresh failed for {symbol}: {e}")
 
 
+async def nightly_db_backup(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Daily online backup of trading.db (the labeled outcome data is the one
+    thing this system can't regenerate). Keeps the newest 7 in data/backups/."""
+    try:
+        from database import backup_db
+        path = backup_db(keep=7)
+        logger.info(f"[backup] DB backed up to {path}")
+    except Exception as e:
+        logger.error(f"[backup] nightly DB backup failed: {e}")
+        if ADMIN_CHAT_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=f"⚠️ Nightly DB backup failed: {e}",
+                )
+            except Exception:
+                pass
+
+
 async def drift_detection_check(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Nightly PSI drift check. Compares current 5m feature distributions against
@@ -649,7 +670,7 @@ async def continuous_learning(context: ContextTypes.DEFAULT_TYPE) -> None:
                 note="retrained" if ok else "retrain_failed",
             )
             if ok:
-                retrained.append((symbol, len(outcome_data or []), trigger))
+                retrained.append((symbol, getattr(model, "last_blend_count", 0), trigger))
                 logger.info(
                     f"[ML] Retrained {symbol} — outcomes since last train: "
                     f"{current_count - model.outcome_count_at_train}"
@@ -2138,6 +2159,10 @@ def main() -> None:
     # Nightly PSI drift detection: 02:00 UTC daily
     app.job_queue.run_daily(drift_detection_check,
                             time=datetime.strptime("02:00", "%H:%M").time())
+    # Nightly DB backup: 03:00 UTC daily — the labeled outcomes in trading.db
+    # are the one thing this system can't regenerate
+    app.job_queue.run_daily(nightly_db_backup,
+                            time=datetime.strptime("03:00", "%H:%M").time())
 
     logger.info(f"Bot @{BOT_USERNAME} started — channel: {CHANNEL_ID}")
     app.run_polling()

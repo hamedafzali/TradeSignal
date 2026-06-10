@@ -17,6 +17,10 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 
 RETRAIN_EVERY = int(os.getenv("RETRAIN_EVERY_SECONDS", "7200"))  # 2-hour fallback
 RETRAIN_OUTCOME_THRESHOLD = int(os.getenv("RETRAIN_OUTCOME_THRESHOLD", "25"))
+# Minimum resolved live outcomes (per direction) before blending them into
+# training. Below this, a 5x-weighted handful of trades dominates the GBM loss
+# and the model whipsaws on individual outcomes instead of learning patterns.
+MIN_LIVE_BLEND = int(os.getenv("MIN_LIVE_BLEND_OUTCOMES", "30"))
 AI_SIGNAL_THRESHOLD = float(os.getenv("AI_SIGNAL_THRESHOLD", "0.65"))
 
 # ── Sector ETF map ───────────────────────────────────────────────────────────
@@ -363,6 +367,7 @@ class StockModel:
         self.train_samples    = 0
         self.outcome_samples  = 0
         self.outcome_count_at_train = 0
+        self.last_blend_count = 0  # live outcomes actually blended in last train()
         self._path = os.path.join(CACHE_DIR, f"{symbol}.pkl")
         self._load()
 
@@ -385,14 +390,14 @@ class StockModel:
     def needs_retrain(self, current_outcome_count: int = 0) -> bool:
         if not self.trained:
             return True
+        # Below the blend threshold, train() skips live outcomes entirely, so a
+        # retrain reproduces the same synthetic-only model — pure waste
+        # (~8s of yfinance downloads per symbol per cycle).
+        if current_outcome_count < MIN_LIVE_BLEND:
+            return False
         new_outcomes = current_outcome_count - self.outcome_count_at_train
         if new_outcomes >= RETRAIN_OUTCOME_THRESHOLD:
             return True
-        # Skip time-based retrain when no live outcomes exist — retraining on
-        # the same synthetic-only data every 2h achieves nothing and wastes
-        # ~8s of yfinance downloads per symbol per cycle.
-        if current_outcome_count == 0:
-            return False
         return (time.time() - self.trained_at) > RETRAIN_EVERY
 
     def train(self, outcome_data: list[dict] | None = None, _log: bool = True) -> bool:
@@ -434,6 +439,25 @@ class StockModel:
             # without creating near-duplicate rows that overfit.
             sample_weight_buy  = np.ones(len(X))
             sample_weight_sell = np.ones(len(X))
+            self.last_blend_count = 0
+            # Per-direction gate: blend BUY outcomes only once there are enough of
+            # them to constitute a sample, same for SELL. With ~98% BUY signals,
+            # clf_sell would otherwise be "trained" on 1-2 live trades.
+            if outcome_data:
+                n_buy_outcomes  = sum(1 for it in outcome_data if abs(it["label"]) == 1)
+                n_sell_outcomes = sum(1 for it in outcome_data if abs(it["label"]) == 2)
+                blend_buy  = n_buy_outcomes  >= MIN_LIVE_BLEND
+                blend_sell = n_sell_outcomes >= MIN_LIVE_BLEND
+                if not (blend_buy or blend_sell):
+                    logger.info(
+                        f"[ML] {self.symbol}: {len(outcome_data)} live outcomes below "
+                        f"blend threshold ({MIN_LIVE_BLEND}/direction) — training synthetic-only"
+                    )
+                    outcome_data = None
+                else:
+                    outcome_data = [it for it in outcome_data
+                                    if (blend_buy and abs(it["label"]) == 1)
+                                    or (blend_sell and abs(it["label"]) == 2)]
             if outcome_data:
                 extra_rows, extra_buy, extra_sell = [], [], []
                 sw_buy_extra, sw_sell_extra = [], []
@@ -465,6 +489,7 @@ class StockModel:
                     y_sell = np.concatenate([y_sell, extra_sell])
                     sample_weight_buy  = np.concatenate([np.ones(len(X) - n_real), sw_buy_extra])
                     sample_weight_sell = np.concatenate([np.ones(len(X) - n_real), sw_sell_extra])
+                    self.last_blend_count = n_real
                     logger.info(f"[ML] {self.symbol}: blended {n_real} real outcomes (5x per-classifier sample_weight)")
 
             # Split raw X before fitting the scaler — prevents calibration-set
