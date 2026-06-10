@@ -333,16 +333,16 @@ def get_pending_outcomes_recent(min_age_hours: float = 1.0) -> list[dict]:
 
 
 def get_outcome_count(symbol: str | None = None) -> int:
-    """Count of resolved (non-pending) outcomes, optionally filtered by symbol."""
+    """Count of correct/incorrect resolved outcomes usable for ML training."""
     with _conn() as conn:
         if symbol:
             row = conn.execute(
-                "SELECT COUNT(*) FROM signals WHERE outcome != 'pending' AND symbol = ?",
+                "SELECT COUNT(*) FROM signals WHERE outcome IN ('correct','incorrect') AND symbol = ?",
                 (symbol,)
             ).fetchone()
         else:
             row = conn.execute(
-                "SELECT COUNT(*) FROM signals WHERE outcome != 'pending'"
+                "SELECT COUNT(*) FROM signals WHERE outcome IN ('correct','incorrect')"
             ).fetchone()
         return row[0]
 
@@ -389,9 +389,16 @@ def get_outcome_training_data(symbol: str | None = None) -> list[dict]:
         feats = json.loads(r["features"] or "{}")
         if not feats:
             continue
-        label = (1 if r["action"] == "BUY" else -1) if r["outcome"] == "correct" else (
-            -1 if r["action"] == "BUY" else 1
-        )
+        # label encodes which classifier this sample teaches:
+        #   +1 = "buy here was correct"   (teaches clf_buy to fire)
+        #   -1 = "buy here was wrong"     (teaches clf_buy NOT to fire)
+        #   +2 = "sell here was correct"  (teaches clf_sell to fire)
+        #   -2 = "sell here was wrong"    (teaches clf_sell NOT to fire)
+        # Avoids cross-labeling: an incorrect BUY is NOT assumed to be a good SELL.
+        if r["action"] == "BUY":
+            label = 1 if r["outcome"] == "correct" else -1
+        else:
+            label = 2 if r["outcome"] == "correct" else -2
         result.append({"features": feats, "label": label})
     return result
 

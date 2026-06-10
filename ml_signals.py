@@ -418,21 +418,36 @@ class StockModel:
             sample_weight_sell = np.ones(len(X))
             if outcome_data:
                 extra_rows, extra_buy, extra_sell = [], [], []
+                sw_buy_extra, sw_sell_extra = [], []
                 for item in outcome_data:
                     row = [item["features"].get(col, 0.0) for col in self.feature_cols]
                     lbl = item["label"]
                     extra_rows.append(row)
-                    extra_buy.append(1 if lbl == 1 else 0)
-                    extra_sell.append(1 if lbl == -1 else 0)
+                    # label scheme (from get_outcome_training_data):
+                    #  +1 = buy was correct   → teach clf_buy to fire (y_buy=1), clf_sell neutral (0, low weight)
+                    #  -1 = buy was wrong     → teach clf_buy NOT to fire (y_buy=0), clf_sell neutral (0, low weight)
+                    #  +2 = sell was correct  → teach clf_sell to fire (y_sell=1), clf_buy neutral (0, low weight)
+                    #  -2 = sell was wrong    → teach clf_sell NOT to fire (y_sell=0), clf_buy neutral (0, low weight)
+                    if lbl == 1:
+                        extra_buy.append(1);  extra_sell.append(0)
+                        sw_buy_extra.append(5.0); sw_sell_extra.append(0.5)
+                    elif lbl == -1:
+                        extra_buy.append(0);  extra_sell.append(0)
+                        sw_buy_extra.append(5.0); sw_sell_extra.append(0.5)
+                    elif lbl == 2:
+                        extra_buy.append(0);  extra_sell.append(1)
+                        sw_buy_extra.append(0.5); sw_sell_extra.append(5.0)
+                    else:  # -2
+                        extra_buy.append(0);  extra_sell.append(0)
+                        sw_buy_extra.append(0.5); sw_sell_extra.append(5.0)
                 if extra_rows:
                     n_real = len(extra_rows)
                     X      = np.vstack([X, extra_rows])
                     y_buy  = np.concatenate([y_buy,  extra_buy])
                     y_sell = np.concatenate([y_sell, extra_sell])
-                    # 5x weight applied via sample_weight, not row repetition
-                    sample_weight_buy  = np.concatenate([np.ones(len(X) - n_real), np.full(n_real, 5.0)])
-                    sample_weight_sell = sample_weight_buy.copy()
-                    logger.info(f"[ML] {self.symbol}: blended {n_real} real outcomes (5x sample_weight)")
+                    sample_weight_buy  = np.concatenate([np.ones(len(X) - n_real), sw_buy_extra])
+                    sample_weight_sell = np.concatenate([np.ones(len(X) - n_real), sw_sell_extra])
+                    logger.info(f"[ML] {self.symbol}: blended {n_real} real outcomes (5x per-classifier sample_weight)")
 
             # Split raw X before fitting the scaler — prevents calibration-set
             # distribution from leaking into the scaler's mean/variance.

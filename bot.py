@@ -63,7 +63,7 @@ from database import (
     unsubscribe_user,
     update_outcome,
 )
-from ml_signals import StockModel, build_features, get_predict_market_context
+from ml_signals import StockModel, build_features, get_predict_market_context, _get_sector_ctx
 from sentiment import get_sentiment, refresh_cache as refresh_sentiment
 from signals import (
     _atr, _macd, _rsi,
@@ -307,10 +307,11 @@ def _is_hostile_regime(spy_df: "pd.DataFrame | None", vix_df: "pd.DataFrame | No
 
 # ── ML helpers ────────────────────────────────────────────────────────────────
 
-def _current_features(df) -> dict:
+def _current_features(df, symbol: str | None = None) -> dict:
     try:
         spy_df, vix_df = get_predict_market_context()
-        return build_features(df, spy_df=spy_df, vix_df=vix_df).dropna().iloc[-1].to_dict()
+        sector_df = _get_sector_ctx(symbol) if symbol else None
+        return build_features(df, spy_df=spy_df, vix_df=vix_df, sector_df=sector_df).dropna().iloc[-1].to_dict()
     except Exception:
         return {}
 
@@ -923,7 +924,7 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
                 continue
 
-            feat = _current_features(df_5m) if df_5m is not None else {}
+            feat = _current_features(df_5m, symbol=symbol) if df_5m is not None else {}
             log_signal(sig, features=feat)
             n_signals += 1
 
