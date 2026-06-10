@@ -370,6 +370,11 @@ class StockModel:
         new_outcomes = current_outcome_count - self.outcome_count_at_train
         if new_outcomes >= RETRAIN_OUTCOME_THRESHOLD:
             return True
+        # Skip time-based retrain when no live outcomes exist — retraining on
+        # the same synthetic-only data every 2h achieves nothing and wastes
+        # ~8s of yfinance downloads per symbol per cycle.
+        if current_outcome_count == 0:
+            return False
         return (time.time() - self.trained_at) > RETRAIN_EVERY
 
     def train(self, outcome_data: list[dict] | None = None, _log: bool = True) -> bool:
