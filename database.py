@@ -795,7 +795,7 @@ def get_weekly_stats() -> dict:
             per_symbol[sym] = {"total": 0, "correct": 0, "resolved": 0}
         per_symbol[sym]["total"] += r["total"]
         per_symbol[sym]["correct"] += r["correct"]
-        per_symbol[sym]["resolved"] += r["resolved"]
+        per_symbol[sym]["resolved"] += r["correct"] + r["incorrect"]
     return {
         "total": total,
         "resolved": resolved_total,
