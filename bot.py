@@ -62,6 +62,8 @@ from database import (
     subscribe_user,
     unsubscribe_user,
     update_outcome,
+    get_symbol_name,
+    update_symbol_name,
 )
 from ml_signals import StockModel, build_features, get_predict_market_context, _get_sector_ctx
 from sentiment import get_sentiment, refresh_cache as refresh_sentiment
@@ -309,6 +311,40 @@ def _is_hostile_regime(spy_df: "pd.DataFrame | None", vix_df: "pd.DataFrame | No
         pass
 
     return False, ""
+
+
+# ── Company name helpers ──────────────────────────────────────────────────────
+
+_name_cache: dict[str, str] = {}  # symbol → company name, in-process cache
+
+
+def _get_company_name(symbol: str) -> str | None:
+    if symbol in _name_cache:
+        return _name_cache[symbol]
+    name = get_symbol_name(symbol)
+    if name:
+        _name_cache[symbol] = name
+    return name
+
+
+def _populate_symbol_names() -> None:
+    """Fetch company names from yfinance for symbols missing them. Runs once at startup."""
+    import threading
+    def _run():
+        for sym in get_active_symbols():
+            if get_symbol_name(sym):
+                continue
+            try:
+                info = yf.Ticker(sym).info
+                name = (info.get("shortName") or info.get("longName") or "").strip()
+                # Strip exchange suffixes yfinance appends (e.g. "Eni S.p.A.")
+                if name:
+                    update_symbol_name(sym, name)
+                    _name_cache[sym] = name
+                    logger.debug(f"[names] {sym} → {name}")
+            except Exception as e:
+                logger.debug(f"[names] failed for {sym}: {e}")
+    threading.Thread(target=_run, daemon=True, name="symbol_names").start()
 
 
 # ── ML helpers ────────────────────────────────────────────────────────────────
@@ -935,6 +971,7 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
             # 5m bars produce same column names but different scale/lookback values.
             feat = _current_features(df_1h, symbol=symbol) if df_1h is not None else (
                    _current_features(df_5m, symbol=symbol) if df_5m is not None else {})
+            sig["company_name"] = _get_company_name(symbol)
             log_signal(sig, features=feat)
             n_signals += 1
 
@@ -1857,6 +1894,9 @@ async def post_init(app: Application) -> None:
     for sym in get_active_symbols():
         if sym not in models:
             models[sym] = StockModel(sym)
+
+    # Fetch company names from yfinance for any symbol that doesn't have one yet
+    _populate_symbol_names()
 
     # Register commands so they appear in Telegram's "/" command list
     await app.bot.set_my_commands([

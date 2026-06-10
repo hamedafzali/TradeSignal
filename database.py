@@ -232,10 +232,12 @@ def init_db() -> None:
         for col, sql_type in train_migrations.items():
             if col not in train_cols:
                 conn.execute(f"ALTER TABLE ml_training_log ADD COLUMN {col} {sql_type}")
-        # Add market column to symbols if missing
+        # Add market and company_name columns to symbols if missing
         sym_cols = [r[1] for r in conn.execute("PRAGMA table_info(symbols)").fetchall()]
         if "market" not in sym_cols:
             conn.execute("ALTER TABLE symbols ADD COLUMN market TEXT")
+        if "company_name" not in sym_cols:
+            conn.execute("ALTER TABLE symbols ADD COLUMN company_name TEXT")
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────
@@ -806,6 +808,22 @@ def get_active_symbols() -> list[str]:
             "SELECT symbol FROM symbols WHERE active = 1 ORDER BY added_at"
         ).fetchall()
         return [r["symbol"] for r in rows]
+
+
+def get_symbol_name(symbol: str) -> str | None:
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT company_name FROM symbols WHERE symbol = ?", (symbol.upper(),)
+        ).fetchone()
+        return row["company_name"] if row else None
+
+
+def update_symbol_name(symbol: str, name: str) -> None:
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE symbols SET company_name = ? WHERE symbol = ?",
+            (name, symbol.upper())
+        )
 
 
 def add_symbol(symbol: str, added_by: str = "admin") -> bool:

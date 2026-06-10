@@ -11,6 +11,13 @@ Usage:
 from __future__ import annotations
 
 
+def symbol_display(symbol: str, name: str | None = None) -> str:
+    """Returns 'Name (TICKER)' when a company name is available, else just 'TICKER'."""
+    if name:
+        return f"{name} ({symbol})"
+    return symbol
+
+
 # ── Generic strings ────────────────────────────────────────────────────────────
 
 _S: dict[str, dict[str, str]] = {
@@ -325,6 +332,7 @@ def _signal_beginner(sig: dict, lang: str, action_emoji: str,
                      currency_symbol: str = "$", fx_rate: float = 1.0) -> str:
     action   = sig["action"]
     symbol   = sig["symbol"]
+    disp     = symbol_display(symbol, sig.get("company_name"))
     price    = sig["price"] * fx_rate
     tp       = sig.get("tp", 0) * fx_rate
     sl       = sig.get("sl", 0) * fx_rate
@@ -350,7 +358,7 @@ def _signal_beginner(sig: dict, lang: str, action_emoji: str,
         }.get(strength, "")
         mtf_line = "\n✅ تأیید چند تایم‌فریمی (۱ ساعته + ۵ دقیقه‌ای)" if mtf else ""
         return (
-            f"{action_emoji} *سیگنال {action_word} — {symbol}*\n"
+            f"{action_emoji} *سیگنال {action_word} — {disp}*\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"💰 {entry_label}:    `{cs}{price:.2f}`\n"
             f"🎯 هدف قیمتی:    `{cs}{tp:.2f}`  *(سود +{tp_pct:.1f}٪)*\n"
@@ -372,7 +380,7 @@ def _signal_beginner(sig: dict, lang: str, action_emoji: str,
         }.get(strength, "")
         mtf_line = "\n✅ Confirmed on both 1h and 5m chart" if mtf else ""
         return (
-            f"{action_emoji} *{action_word} Signal — {symbol}*\n"
+            f"{action_emoji} *{action_word} Signal — {disp}*\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"💰 {entry_label}    `{cs}{price:.2f}`\n"
             f"🎯 Target:    `{cs}{tp:.2f}`  *(profit +{tp_pct:.1f}%)*\n"
@@ -390,6 +398,7 @@ def _signal_expert(sig: dict, lang: str, action_emoji: str,
                    currency_symbol: str = "$", fx_rate: float = 1.0) -> str:
     action   = sig["action"]
     symbol   = sig["symbol"]
+    disp     = symbol_display(symbol, sig.get("company_name"))
     price    = sig["price"] * fx_rate
     tp       = sig.get("tp", 0) * fx_rate
     sl       = sig.get("sl", 0) * fx_rate
@@ -428,7 +437,7 @@ def _signal_expert(sig: dict, lang: str, action_emoji: str,
         ai_line = f"\nهوش مصنوعی: `{ai_conf*100:.0f}٪` اطمینان" if ai_conf else ""
         mtf_line = "\n✅ تأیید چند تایم‌فریمی (۱ساعته+۵دقیقه)" if mtf else ""
         return (
-            f"{action_emoji} *{action_word} — ${symbol}*\n"
+            f"{action_emoji} *{action_word} — {disp}*\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"ورود:         `{cs}{price:.2f}`\n"
             f"🎯 هدف:      `{cs}{tp:.2f}`  (`{tp_sign}{tp_pct:.1f}٪`)\n"
@@ -448,7 +457,7 @@ def _signal_expert(sig: dict, lang: str, action_emoji: str,
         ai_line = f"\nAI: `{ai_conf*100:.0f}%` confident" if ai_conf else ""
         mtf_line = "\n✅ Multi-timeframe confirmed (1h+5m)" if mtf else ""
         return (
-            f"{action_emoji} *{action} — ${symbol}*\n"
+            f"{action_emoji} *{action} — {disp}*\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"Entry:       `{cs}{price:.2f}`\n"
             f"🎯 Target:  `{cs}{tp:.2f}`  (`{tp_sign}{tp_pct:.1f}%`)\n"
