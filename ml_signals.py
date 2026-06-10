@@ -1,3 +1,4 @@
+import copy
 import logging
 import os
 import pickle
@@ -21,6 +22,10 @@ RETRAIN_OUTCOME_THRESHOLD = int(os.getenv("RETRAIN_OUTCOME_THRESHOLD", "25"))
 # training. Below this, a 5x-weighted handful of trades dominates the GBM loss
 # and the model whipsaws on individual outcomes instead of learning patterns.
 MIN_LIVE_BLEND = int(os.getenv("MIN_LIVE_BLEND_OUTCOMES", "30"))
+# Champion/challenger: a retrained model is rejected if its holdout buy-AUC is
+# worse than the current model's by more than this margin (~2x the AUC standard
+# error at the typical ~1,200-sample calibration set).
+PROMOTION_AUC_MARGIN = float(os.getenv("PROMOTION_AUC_MARGIN", "0.05"))
 AI_SIGNAL_THRESHOLD = float(os.getenv("AI_SIGNAL_THRESHOLD", "0.65"))
 
 # ── Sector ETF map ───────────────────────────────────────────────────────────
@@ -380,6 +385,7 @@ class StockModel:
         self.last_blend_count = 0  # live outcomes actually blended in last train()
         self.val_auc_buy:  float | None = None  # holdout AUC from last train()
         self.val_auc_sell: float | None = None
+        self.last_promotion = ""  # "promoted" | "rejected" from last train_gated()
         self._path = os.path.join(CACHE_DIR, f"{symbol}.pkl")
         self._load()
 
@@ -411,6 +417,40 @@ class StockModel:
         if new_outcomes >= RETRAIN_OUTCOME_THRESHOLD:
             return True
         return (time.time() - self.trained_at) > RETRAIN_EVERY
+
+    def train_gated(self, outcome_data: list[dict] | None = None) -> bool:
+        """
+        Champion/challenger wrapper around train(): keeps the retrained model
+        only if its holdout buy-AUC is not materially worse than the current
+        model's. Retrains previously deployed unconditionally, so one bad
+        retrain (bad data window, yfinance glitch) silently replaced a good
+        model with no detection. Use this for all scheduled/automatic retrains;
+        bootstrap and first-time training go through train() directly.
+        """
+        champion = None
+        champion_auc = self.val_auc_buy if self.trained else None
+        if self.trained and champion_auc is not None:
+            # train() refits estimators in place — a shallow snapshot would be
+            # corrupted by the retrain, so deep-copy the persisted state.
+            champion = copy.deepcopy(
+                {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
+            )
+        ok = self.train(outcome_data)
+        if not ok:
+            return False
+        self.last_promotion = "promoted"
+        if (champion is not None
+                and self.val_auc_buy is not None
+                and self.val_auc_buy < champion_auc - PROMOTION_AUC_MARGIN):
+            logger.warning(
+                f"[ML] {self.symbol}: challenger REJECTED — holdout AUC "
+                f"{self.val_auc_buy:.3f} vs champion {champion_auc:.3f} "
+                f"(margin {PROMOTION_AUC_MARGIN})"
+            )
+            self.__dict__.update(champion)
+            self.last_promotion = "rejected"
+            self._save()  # restore champion pickle (train() saved the challenger)
+        return True
 
     def train(self, outcome_data: list[dict] | None = None, _log: bool = True) -> bool:
         """

@@ -537,6 +537,11 @@ def combine_signals(rule_sig: dict | None, ml_result: dict,
             shadow = True
         if shadow:
             print(f"[signals] shadow mode: AI-only {ai_signal} {symbol} logged, not fired")
+            try:
+                from database import get_setting as _g2, set_setting as _ss
+                _ss("shadow_suppressed_count", str(int(_g2("shadow_suppressed_count", "0") or 0) + 1))
+            except Exception:
+                pass
             return None
         prob = buy_prob if ai_signal == "BUY" else sell_prob
         if prob is not None and prob >= 0.70:

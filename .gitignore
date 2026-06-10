@@ -10,3 +10,4 @@ __pycache__/
 # Data & models — generated at runtime
 data/
 .model_cache/
+host_backups/

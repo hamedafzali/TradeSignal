@@ -23,14 +23,29 @@ def _conn():
         conn.close()
 
 
+# Secondary backup location: lives on the host filesystem via the repo bind
+# mount (/app -> /data/projects/TradeSignal), so backups survive deletion of
+# the app_data docker volume. Gitignored.
+_BACKUP_MIRROR_DIR = os.path.join(os.path.dirname(__file__), "host_backups")
+
+
+def _prune_backups(directory: str, keep: int) -> None:
+    backups = sorted(
+        f for f in os.listdir(directory)
+        if f.startswith("trading-") and f.endswith(".db")
+    )
+    for old in backups[:-keep]:
+        os.remove(os.path.join(directory, old))
+
+
 def backup_db(keep: int = 7) -> str:
     """Online backup via SQLite's backup API (safe under WAL, no lock needed).
-    Writes data/backups/trading-YYYYMMDD.db and prunes to the newest `keep`."""
+    Writes data/backups/trading-YYYYMMDD.db, mirrors it to the host-mounted
+    repo dir, and prunes both locations to the newest `keep`."""
     backup_dir = os.path.join(os.path.dirname(DB_PATH), "backups")
     os.makedirs(backup_dir, exist_ok=True)
-    dest_path = os.path.join(
-        backup_dir, f"trading-{datetime.utcnow().strftime('%Y%m%d')}.db"
-    )
+    fname = f"trading-{datetime.utcnow().strftime('%Y%m%d')}.db"
+    dest_path = os.path.join(backup_dir, fname)
     src = sqlite3.connect(DB_PATH, timeout=10)
     dest = sqlite3.connect(dest_path)
     try:
@@ -38,12 +53,14 @@ def backup_db(keep: int = 7) -> str:
     finally:
         dest.close()
         src.close()
-    backups = sorted(
-        f for f in os.listdir(backup_dir)
-        if f.startswith("trading-") and f.endswith(".db")
-    )
-    for old in backups[:-keep]:
-        os.remove(os.path.join(backup_dir, old))
+    _prune_backups(backup_dir, keep)
+    try:
+        import shutil
+        os.makedirs(_BACKUP_MIRROR_DIR, exist_ok=True)
+        shutil.copy2(dest_path, os.path.join(_BACKUP_MIRROR_DIR, fname))
+        _prune_backups(_BACKUP_MIRROR_DIR, keep)
+    except Exception:
+        pass  # mirror is best-effort; the primary backup already succeeded
     return dest_path
 
 

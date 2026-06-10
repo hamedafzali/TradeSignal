@@ -29,6 +29,7 @@ from database import (
     complete_action_request,
     close_position,
     get_setting,
+    set_setting,
     create_action_request,
     get_active_symbols,
     get_all_open_positions,
@@ -206,8 +207,20 @@ _sentiment_history: dict[str, list[tuple[float, float]]] = {}
 _SENTIMENT_MOMENTUM_WINDOW = 10800  # 3 hours in seconds
 
 
+_AI_MIN_HOLDOUT_AUC = 0.60  # AI-only allowed when holdout buy-AUC demonstrates skill
+
+
 def _is_ai_capable(symbol: str) -> bool:
-    """Return False for symbols whose bootstrap win rate is below threshold."""
+    """
+    Gate AI-only signals on demonstrated out-of-sample skill.
+    Primary: holdout buy-AUC from the last train (>= 0.60 = real signal;
+    0.5 = coin flip). Falls back to bootstrap win rate for models trained
+    before AUC tracking existed.
+    """
+    model = models.get(symbol)
+    auc = getattr(model, "val_auc_buy", None) if model else None
+    if auc is not None:
+        return auc >= _AI_MIN_HOLDOUT_AUC
     now = _time.time()
     if now - _ai_capable_cache["ts"] > _AI_CAPABLE_TTL:
         try:
@@ -494,11 +507,14 @@ async def _ensure_models_trained(bot=None) -> None:
         current_count = get_outcome_count(symbol)
         if model.needs_retrain(current_outcome_count=current_count):
             outcome_data = get_outcome_training_data(symbol=symbol)
-            ok = model.train(outcome_data=outcome_data)
+            ok = model.train_gated(outcome_data=outcome_data)
             if ok:
                 blended = getattr(model, "last_blend_count", 0)
                 trigger = "outcomes" if blended >= 3 else "time"
-                trained_lines.append(_train_summary_line(symbol, blended, trigger))
+                line = _train_summary_line(symbol, blended, trigger)
+                if getattr(model, "last_promotion", "") == "rejected":
+                    line += " · ⛔ challenger rejected, champion kept"
+                trained_lines.append(line)
     if trained_lines and bot and ADMIN_CHAT_ID:
         try:
             await bot.send_message(
@@ -575,6 +591,61 @@ async def refresh_sentiment_cache(context: ContextTypes.DEFAULT_TYPE) -> None:
             refresh_sentiment(symbol)
         except Exception as e:
             logger.debug(f"[sentiment] refresh failed for {symbol}: {e}")
+
+
+async def ml_health_report(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Weekly ML health report to the admin: live-outcome progress toward the
+    blend threshold, holdout-AUC ranking, shadow-mode activity, 7d win rate.
+    Surfaces the evidence that otherwise only lives in logs."""
+    if not ADMIN_CHAT_ID:
+        return
+    try:
+        from ml_signals import MIN_LIVE_BLEND
+
+        # Outcome progress toward the live-blend threshold
+        counts = {sym: get_outcome_count(sym) for sym in get_active_symbols()}
+        with_outcomes = sorted(
+            ((s, c) for s, c in counts.items() if c > 0),
+            key=lambda x: -x[1],
+        )
+        total_outcomes = sum(counts.values())
+        progress_lines = [
+            f"  `{s}`: {c}/{MIN_LIVE_BLEND}" for s, c in with_outcomes[:8]
+        ] or ["  none yet"]
+
+        # Holdout AUC ranking (skill evidence per symbol)
+        aucs = sorted(
+            ((s, m.val_auc_buy) for s, m in models.items()
+             if getattr(m, "val_auc_buy", None) is not None),
+            key=lambda x: -x[1],
+        )
+        auc_top = [f"  🟢 `{s}` {a:.2f}" for s, a in aucs[:5]]
+        auc_bottom = [f"  🔴 `{s}` {a:.2f}" for s, a in aucs[-3:]] if len(aucs) > 5 else []
+        n_skilled = sum(1 for _, a in aucs if a >= _AI_MIN_HOLDOUT_AUC)
+
+        # Shadow-mode suppressions since last report (counter resets each report)
+        shadow_n = get_setting("shadow_suppressed_count", "0") or "0"
+        set_setting("shadow_suppressed_count", "0")
+
+        wk = get_weekly_stats()
+        wr_line = (f"`{wk['accuracy']}%` ({wk['correct']}/{wk['resolved']})"
+                   if wk["resolved"] > 0 else "no resolved signals")
+
+        msg = (
+            "🩺 *Weekly ML Health Report*\n\n"
+            f"*Live outcomes:* `{total_outcomes}` total — blend gate opens at "
+            f"`{MIN_LIVE_BLEND}`/symbol/direction\n"
+            + "\n".join(progress_lines) + "\n\n"
+            f"*Holdout AUC* ({n_skilled}/{len(aucs)} symbols ≥ {_AI_MIN_HOLDOUT_AUC}):\n"
+            + "\n".join(auc_top + auc_bottom) + "\n\n"
+            f"*Shadow mode:* `{shadow_n}` AI-only signals suppressed this week\n"
+            f"*7d win rate:* {wr_line}"
+        )
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID, text=msg, parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"[ml_health] report failed: {e}")
 
 
 async def nightly_db_backup(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -659,15 +730,17 @@ async def continuous_learning(context: ContextTypes.DEFAULT_TYPE) -> None:
                 continue
 
             outcome_data = get_outcome_training_data(symbol=symbol)
-            ok = model.train(outcome_data or None)
+            ok = model.train_gated(outcome_data or None)
             trigger = "outcomes" if new_outcomes >= 3 else "time"
+            promo = getattr(model, "last_promotion", "")
             log_learning_cycle(
                 symbol,
                 retrain_needed=True,
                 retrained=ok,
                 resolved_outcomes=current_count,
                 new_outcomes=max(0, new_outcomes),
-                note="retrained" if ok else "retrain_failed",
+                note=("challenger_rejected" if promo == "rejected"
+                      else "retrained" if ok else "retrain_failed"),
             )
             if ok:
                 retrained.append((symbol, getattr(model, "last_blend_count", 0), trigger))
@@ -713,8 +786,10 @@ async def process_action_requests(context: ContextTypes.DEFAULT_TYPE) -> None:
                 await check_outcomes(context)
                 note = "manual outcome check completed"
             elif action == "retrain_all":
+                # trained=False is the only flag needs_retrain() honors
+                # unconditionally (trained_at is ignored below blend threshold)
                 for model in models.values():
-                    model.trained_at = 0
+                    model.trained = False
                 await _ensure_models_trained(context.bot)
                 note = "all models retrained"
             elif action == "retrain_symbol":
@@ -723,11 +798,12 @@ async def process_action_requests(context: ContextTypes.DEFAULT_TYPE) -> None:
                 model = models.get(symbol)
                 if model is None:
                     raise ValueError(f"unknown symbol {symbol}")
-                model.trained_at = 0
-                ok = model.train(get_outcome_training_data(symbol=symbol) or None)
+                ok = model.train_gated(get_outcome_training_data(symbol=symbol) or None)
                 if not ok:
                     raise RuntimeError(f"{symbol} retrain failed")
-                note = f"{symbol} retrained"
+                promo = getattr(model, "last_promotion", "")
+                note = (f"{symbol} retrained — challenger rejected, champion kept"
+                        if promo == "rejected" else f"{symbol} retrained")
             elif action == "run_bootstrap":
                 # Guard: refuse if a bootstrap thread is already alive
                 if any(t.name == "bootstrap" for t in threading.enumerate()):
@@ -962,7 +1038,7 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
 
             # Suppress AI-only signals for symbols with poor bootstrap accuracy
             if sig.get("strength") == "AI" and not _is_ai_capable(symbol):
-                logger.info(f"[quality] suppressed AI-only {sig['action']} {symbol}: bootstrap WR below {_AI_MIN_BOOTSTRAP_WR}%")
+                logger.info(f"[quality] suppressed AI-only {sig['action']} {symbol}: no demonstrated skill (AUC < {_AI_MIN_HOLDOUT_AUC} / bootstrap WR < {_AI_MIN_BOOTSTRAP_WR}%)")
                 n_skipped_brake += 1
                 continue
 
@@ -2165,6 +2241,10 @@ def main() -> None:
     # are the one thing this system can't regenerate
     app.job_queue.run_daily(nightly_db_backup,
                             time=datetime.strptime("03:00", "%H:%M").time())
+    # Weekly ML health report: Monday 09:05 UTC (right after the weekly recap)
+    app.job_queue.run_daily(ml_health_report,
+                            time=datetime.strptime("09:05", "%H:%M").time(),
+                            days=(0,))
 
     logger.info(f"Bot @{BOT_USERNAME} started — channel: {CHANNEL_ID}")
     app.run_polling()
