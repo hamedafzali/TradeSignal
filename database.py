@@ -1541,11 +1541,18 @@ def get_wf_results() -> list[dict]:
         return [dict(r) for r in rows]
 
 
-def get_recent_signals(limit: int = 50) -> list[dict]:
+def get_recent_signals(limit: int = 50, include_all_fields: bool = False) -> list[dict]:
+    if include_all_fields:
+        cols = "*"
+    else:
+        cols = ("id, symbol, action, strength, price, rsi, ai_confidence, "
+                "reasons, sent_at, outcome, outcome_price, outcome_at, "
+                "tp, sl, tp_pct, sl_pct, rr, trend, quality, vol_spike, "
+                "regime, features, suggested_size_pct, resolution_reason, "
+                "resolution_minutes, max_favorable_pct, max_adverse_pct")
     with _conn() as conn:
-        rows = conn.execute("""
-            SELECT id, symbol, action, strength, price, rsi, ai_confidence,
-                   reasons, sent_at, outcome, outcome_price, outcome_at
+        rows = conn.execute(f"""
+            SELECT {cols}
             FROM signals
             WHERE symbol IN (SELECT symbol FROM symbols WHERE active=1)
             ORDER BY sent_at DESC LIMIT ?
@@ -1554,6 +1561,11 @@ def get_recent_signals(limit: int = 50) -> list[dict]:
         for r in rows:
             d = dict(r)
             d["reasons"] = json.loads(d["reasons"] or "[]")
+            if "features" in d:
+                try:
+                    d["features"] = json.loads(d["features"] or "{}")
+                except Exception:
+                    d["features"] = {}
             result.append(d)
         return result
 

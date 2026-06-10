@@ -237,6 +237,7 @@ _HTML = """<!DOCTYPE html>
   <ul class="nav nav-tabs mb-3" id="mainTabs">
     <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-command">Command</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-overview">Overview</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-signals">Signals</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-ml">ML</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-activity">Learning</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-performance">Performance</button></li>
@@ -386,6 +387,37 @@ _HTML = """<!DOCTYPE html>
         </div>
       </div>
     </div>
+  </div>
+
+  <!-- ── SIGNALS TAB ──────────────────────────────────────────────────── -->
+  <div class="tab-pane fade" id="tab-signals">
+
+    <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+      <div class="d-flex gap-2 flex-wrap">
+        <select id="sig-filter-action" class="form-control" style="max-width:120px" onchange="refreshSignalsTab()">
+          <option value="">All Actions</option>
+          <option value="BUY">BUY only</option>
+          <option value="SELL">SELL only</option>
+        </select>
+        <select id="sig-filter-outcome" class="form-control" style="max-width:130px" onchange="refreshSignalsTab()">
+          <option value="">All Outcomes</option>
+          <option value="pending">Pending</option>
+          <option value="correct">Correct</option>
+          <option value="incorrect">Incorrect</option>
+          <option value="neutral">Neutral</option>
+        </select>
+        <select id="sig-filter-strength" class="form-control" style="max-width:130px" onchange="refreshSignalsTab()">
+          <option value="">All Types</option>
+          <option value="STRONG">STRONG</option>
+          <option value="AI">AI</option>
+          <option value="RULE">RULE</option>
+        </select>
+      </div>
+      <button class="btn btn-sm" style="background:var(--surface2);color:var(--accent);border:1px solid var(--border)" onclick="refreshSignalsTab()">↻ Refresh</button>
+    </div>
+
+    <div id="signals-explainability-list"></div>
+
   </div>
 
   <!-- ── ML ACCURACY TAB ──────────────────────────────────────────────── -->
@@ -1227,6 +1259,134 @@ async function refreshOverview() {
   </tr>`).join('');
 }
 
+// ── Signals with Explainability ───────────────────────────────────────────────
+let _allSignals = [];
+
+async function refreshSignalsTab() {
+  if (!_allSignals.length) {
+    _allSignals = await fetch('/api/signals').then(r=>r.json());
+  }
+  const filterAction   = document.getElementById('sig-filter-action')?.value || '';
+  const filterOutcome  = document.getElementById('sig-filter-outcome')?.value || '';
+  const filterStrength = document.getElementById('sig-filter-strength')?.value || '';
+
+  let sigs = _allSignals;
+  if (filterAction)   sigs = sigs.filter(s => s.action   === filterAction);
+  if (filterOutcome)  sigs = sigs.filter(s => s.outcome  === filterOutcome);
+  if (filterStrength) sigs = sigs.filter(s => s.strength === filterStrength);
+
+  const container = document.getElementById('signals-explainability-list');
+  if (!sigs.length) {
+    container.innerHTML = '<div class="text-muted text-center py-4">No signals match the selected filters.</div>';
+    return;
+  }
+
+  container.innerHTML = sigs.map((s, idx) => {
+    const outcomeClasses = {correct:'badge-correct',incorrect:'badge-incorrect',neutral:'badge-neutral',pending:'badge-pending'};
+    const outBadge = outcomeBadge(s.outcome);
+    const actBadge = badge(s.action, 'badge-'+s.action);
+    const typBadge = badge(s.strength||'RULE','badge-'+(s.strength||'RULE'));
+    const aiPct = s.ai_confidence ? (s.ai_confidence*100).toFixed(0)+'%' : '—';
+    const dur = s.resolution_minutes ? Math.round(s.resolution_minutes)+'m' : '—';
+    const regime = s.regime || '—';
+    const regColor = {bull:'var(--green)',bear:'var(--red)',volatile:'var(--yellow)',unknown:'var(--muted)'}[regime]||'var(--muted)';
+    const price = s.price ? _fxSymbol + fxPrice(s.price) : '—';
+    const tp = s.tp ? _fxSymbol + fxPrice(s.tp) : '—';
+    const sl = s.sl ? _fxSymbol + fxPrice(s.sl) : '—';
+
+    // Explainability bars
+    const reasons = Array.isArray(s.reasons) ? s.reasons : [];
+    const hasRuleSignal = reasons.some(r => /EMA|RSI|MACD|volume/i.test(r));
+    const hasAI = s.ai_confidence !== null && s.ai_confidence !== undefined;
+    const hasSentiment = reasons.some(r => /sentiment/i.test(r));
+
+    const ruleScore  = hasRuleSignal ? Math.min(100, 30 + reasons.filter(r => /EMA|RSI|MACD|volume/i.test(r)).length * 15) : 0;
+    const aiScore    = hasAI ? Math.round((s.ai_confidence || 0) * 100) : 0;
+    const sentScore  = hasSentiment ? 12 : 0;
+    const qualScore  = (s.quality || 0) * 8;
+
+    function scoreBar(label, score, color) {
+      if (!score) return '';
+      const w = Math.min(score, 100);
+      return `<div class="d-flex align-items-center gap-2 mb-1" style="font-size:.74rem">
+        <span style="color:var(--muted);min-width:90px">${label}</span>
+        <div class="progress flex-grow-1" style="height:5px">
+          <div class="progress-bar" style="width:${w}%;background:${color}"></div>
+        </div>
+        <span style="color:${color};min-width:36px;text-align:right">${score}%</span>
+      </div>`;
+    }
+
+    const explainBars = `
+      ${scoreBar('Rule Engine', ruleScore, 'var(--green)')}
+      ${scoreBar('ML Engine', aiScore, 'var(--purple)')}
+      ${scoreBar('Sentiment', sentScore, 'var(--accent)')}
+      ${scoreBar('Quality Score', qualScore, 'var(--yellow)')}
+    `;
+
+    const reasonsList = reasons.length
+      ? reasons.map(r => `<div class="mb-1" style="font-size:.76rem;color:var(--text)">• ${r}</div>`).join('')
+      : '<div class="text-muted" style="font-size:.76rem">No reasons recorded</div>';
+
+    const mfe = s.max_favorable_pct != null ? `+${Number(s.max_favorable_pct).toFixed(2)}%` : '—';
+    const mae = s.max_adverse_pct  != null ? `${Number(s.max_adverse_pct).toFixed(2)}%` : '—';
+    const resReason = s.resolution_reason ? s.resolution_reason.replace(/_/g,' ') : '—';
+
+    return `
+    <div class="card mb-2" id="sig-card-${idx}">
+      <div class="p-3" style="cursor:pointer" onclick="toggleSigDetail(${idx})">
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+          <span class="sym-tag">${s.symbol}</span>
+          ${actBadge} ${typBadge} ${outBadge}
+          <span style="color:var(--muted);font-size:.78rem">${formatShortTime(s.sent_at)}</span>
+          <span style="color:var(--text);font-size:.80rem">${price}</span>
+          <span style="color:var(--muted);font-size:.76rem">AI: ${aiPct}</span>
+          <span style="color:${regColor};font-size:.72rem">${regime}</span>
+          <span class="ms-auto text-muted" style="font-size:.72rem" id="sig-chevron-${idx}">▼ expand</span>
+        </div>
+        ${explainBars ? `<div class="mt-2">${explainBars}</div>` : ''}
+      </div>
+      <div id="sig-detail-${idx}" style="display:none;border-top:1px solid var(--border);padding:14px">
+        <div class="row g-3">
+          <div class="col-md-5">
+            <div style="font-size:.76rem;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em">Signal Reasons</div>
+            ${reasonsList}
+          </div>
+          <div class="col-md-4">
+            <div style="font-size:.76rem;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em">Trade Details</div>
+            <div style="font-size:.78rem;line-height:1.8">
+              Entry: <span style="color:var(--text)">${price}</span><br>
+              TP: <span style="color:var(--green)">${tp}</span> ${s.tp_pct ? `(+${Number(s.tp_pct).toFixed(1)}%)` : ''}<br>
+              SL: <span style="color:var(--red)">${sl}</span> ${s.sl_pct ? `(${Number(s.sl_pct).toFixed(1)}%)` : ''}<br>
+              R:R: <span style="color:var(--yellow)">${s.rr ? '1:'+s.rr : '—'}</span><br>
+              RSI: <span style="color:var(--text)">${s.rsi ? Number(s.rsi).toFixed(1) : '—'}</span>
+            </div>
+          </div>
+          <div class="col-md-3">
+            <div style="font-size:.76rem;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em">Outcome</div>
+            <div style="font-size:.78rem;line-height:1.8">
+              Result: ${outBadge}<br>
+              Resolution: <span style="color:var(--muted)">${resReason}</span><br>
+              Duration: <span style="color:var(--text)">${dur}</span><br>
+              MFE: <span style="color:var(--green)">${mfe}</span><br>
+              MAE: <span style="color:var(--red)">${mae}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function toggleSigDetail(idx) {
+  const detail = document.getElementById(`sig-detail-${idx}`);
+  const chevron = document.getElementById(`sig-chevron-${idx}`);
+  if (!detail) return;
+  const open = detail.style.display !== 'none';
+  detail.style.display = open ? 'none' : '';
+  if (chevron) chevron.textContent = open ? '▼ expand' : '▲ collapse';
+}
+
 // ── ML ────────────────────────────────────────────────────────────────────────
 async function refreshML() {
   const ml = await fetch('/api/ml-stats').then(r=>r.json());
@@ -2008,6 +2168,9 @@ document.querySelectorAll('[data-bs-target="#tab-command"]').forEach(el =>
 document.querySelectorAll('[data-bs-target="#tab-overview"]').forEach(el =>
   el.addEventListener('shown.bs.tab', () => refreshOverview())
 );
+document.querySelectorAll('[data-bs-target="#tab-signals"]').forEach(el =>
+  el.addEventListener('shown.bs.tab', () => { _allSignals = []; refreshSignalsTab(); })
+);
 document.querySelectorAll('[data-bs-target="#tab-ml"]').forEach(el =>
   el.addEventListener('shown.bs.tab', () => refreshML())
 );
@@ -2193,7 +2356,7 @@ def api_stats():
 
 @app.route("/api/signals")
 def api_signals():
-    return jsonify(get_recent_signals(50))
+    return jsonify(get_recent_signals(100, include_all_fields=True))
 
 
 @app.route("/api/ml-stats")
