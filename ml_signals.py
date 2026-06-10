@@ -33,8 +33,9 @@ _SECTOR_MAP: dict[str, str | None] = {
 
 # ── Market context cache ──────────────────────────────────────────────────────
 _mkt_cache: dict = {"ts": 0.0, "spy": None, "vix": None}
-_mkt_last_good: dict = {"spy": None, "vix": None}  # never cleared — stale fallback
-_MKT_TTL = 300  # seconds
+_mkt_last_good: dict = {"spy": None, "vix": None, "ts": 0.0}
+_MKT_TTL = 300        # seconds — live cache TTL
+_MKT_FALLBACK_MAX = 4 * 3600  # 4h — don't use stale data older than this
 _sector_cache: dict[str, dict] = {}  # etf_ticker → {ts, df}
 
 
@@ -54,6 +55,7 @@ def _get_market_ctx(period: str = "60d") -> tuple[pd.DataFrame | None, pd.DataFr
             spy = None
         else:
             _mkt_last_good["spy"] = spy
+            _mkt_last_good["ts"]  = now
     except Exception as e:
         logger.debug(f"[ML] SPY fetch failed: {e}")
     try:
@@ -64,13 +66,15 @@ def _get_market_ctx(period: str = "60d") -> tuple[pd.DataFrame | None, pd.DataFr
             vix = None
         else:
             _mkt_last_good["vix"] = vix
+            _mkt_last_good["ts"]  = now
     except Exception as e:
         logger.debug(f"[ML] VIX fetch failed: {e}")
-    # Use last known good data when current fetch failed
-    if spy is None and _mkt_last_good["spy"] is not None:
+    # Fall back to last known good data only if it is fresh enough
+    fallback_ok = (now - _mkt_last_good["ts"]) < _MKT_FALLBACK_MAX
+    if spy is None and _mkt_last_good["spy"] is not None and fallback_ok:
         spy = _mkt_last_good["spy"]
         logger.debug("[ML] SPY: using last known good data (fetch failed)")
-    if vix is None and _mkt_last_good["vix"] is not None:
+    if vix is None and _mkt_last_good["vix"] is not None and fallback_ok:
         vix = _mkt_last_good["vix"]
         logger.debug("[ML] VIX: using last known good data (fetch failed)")
     _mkt_cache.update({"ts": now, "spy": spy, "vix": vix})

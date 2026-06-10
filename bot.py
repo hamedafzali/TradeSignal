@@ -235,12 +235,14 @@ def get_market_regime(spy_df: "pd.DataFrame | None" = None,
         pass
     if spy_df is None and vix_df is None:
         return "unknown"
+    spy_above_ema = None  # None = unknown, treated as neutral (no bull bias)
     try:
-        spy_c = spy_df["Close"].squeeze()
-        spy_ema50 = spy_c.ewm(span=50, adjust=False).mean()
-        spy_above_ema = float(spy_c.iloc[-1]) >= float(spy_ema50.iloc[-1])
+        if spy_df is not None:
+            spy_c = spy_df["Close"].squeeze()
+            spy_ema50 = spy_c.ewm(span=50, adjust=False).mean()
+            spy_above_ema = float(spy_c.iloc[-1]) >= float(spy_ema50.iloc[-1])
     except Exception:
-        spy_above_ema = True
+        pass
 
     try:
         vix_c = vix_df["Close"].squeeze()
@@ -255,9 +257,11 @@ def get_market_regime(spy_df: "pd.DataFrame | None" = None,
 
     if vix_high or vix_spike:
         return "volatile"
-    if spy_above_ema:
+    if spy_above_ema is True:
         return "bull"
-    return "bear"
+    if spy_above_ema is False:
+        return "bear"
+    return "unknown"  # spy_df was unavailable but vix was fine (rare)
 
 
 def _is_hostile_regime(spy_df: "pd.DataFrame | None", vix_df: "pd.DataFrame | None",
@@ -450,7 +454,8 @@ def _resolve_signal_outcome(sig: dict) -> dict | None:
 async def _ensure_models_trained(bot=None) -> None:
     trained_lines = []
     for symbol, model in models.items():
-        if model.needs_retrain():
+        current_count = get_outcome_count(symbol)
+        if model.needs_retrain(current_outcome_count=current_count):
             outcome_data = get_outcome_training_data(symbol=symbol)
             ok = model.train(outcome_data=outcome_data)
             if ok:
@@ -926,7 +931,10 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
                 continue
 
-            feat = _current_features(df_5m, symbol=symbol) if df_5m is not None else {}
+            # Use 1h bars for saved features — clf_buy/clf_sell are 1h-trained models;
+            # 5m bars produce same column names but different scale/lookback values.
+            feat = _current_features(df_1h, symbol=symbol) if df_1h is not None else (
+                   _current_features(df_5m, symbol=symbol) if df_5m is not None else {})
             log_signal(sig, features=feat)
             n_signals += 1
 
