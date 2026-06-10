@@ -51,6 +51,7 @@ from database import (
     get_weekly_stats,
     init_db,
     log_learning_cycle,
+    log_scan,
     log_signal,
     log_user,
     open_position,
@@ -793,6 +794,7 @@ def _update_perf_brake(outcome_correct: bool) -> None:
 async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
     global _perf_scan_counter
     _perf_scan_counter += 1
+    scan_start = _time.time()
 
     # Performance brake: skip every other scan when recent win rate is critically low
     if _perf_brake_engaged and (_perf_scan_counter % 2 == 0):
@@ -804,14 +806,23 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
     # Concurrent direction counters — reset each scan cycle
     direction_count: dict[str, int] = {"BUY": 0, "SELL": 0}
 
-    for symbol in _get_symbols():
+    all_symbols = _get_symbols()
+    n_scanned = 0
+    n_skipped_market = 0
+    n_skipped_brake = 0
+    n_signals = 0
+    scan_regime: str | None = None
+
+    for symbol in all_symbols:
         # Skip non-crypto outside regular market hours (9:30am–4:00pm ET)
         if not is_crypto(symbol):
             session = market_session(symbol)
             if session != "open":
                 logger.debug(f"{symbol}: market {session} — skip")
+                n_skipped_market += 1
                 continue
 
+        n_scanned += 1
         try:
             # Multi-timeframe: get 1h bias first
             bias_1h, df_1h = get_1h_bias(symbol)
@@ -887,6 +898,7 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
             # Suppress AI-only signals for symbols with poor bootstrap accuracy
             if sig.get("strength") == "AI" and not _is_ai_capable(symbol):
                 logger.info(f"[quality] suppressed AI-only {sig['action']} {symbol}: bootstrap WR below {_AI_MIN_BOOTSTRAP_WR}%")
+                n_skipped_brake += 1
                 continue
 
             # Regime filter — suppress during hostile macro conditions
@@ -898,6 +910,7 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
 
             # Tag signal with current 3-state regime before persisting
             sig["regime"] = get_market_regime(spy_df_ctx, vix_df_ctx)
+            scan_regime = sig["regime"]
 
             # Concurrent direction limit: max 3 same-direction signals per scan cycle.
             # Prevents correlated position accumulation (e.g. 8 tech stocks all BUY).
@@ -912,6 +925,7 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
 
             feat = _current_features(df_5m) if df_5m is not None else {}
             log_signal(sig, features=feat)
+            n_signals += 1
 
             session = market_session(symbol)
             await _broadcast_signal(context.bot, sig, session)
@@ -929,6 +943,22 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         except Exception as e:
             logger.error(f"Error scanning {symbol}: {e}")
+
+    scan_duration_ms = (_time.time() - scan_start) * 1000
+    try:
+        log_scan(
+            scanned_at=datetime.utcnow().isoformat(),
+            symbols_total=len(all_symbols),
+            symbols_scanned=n_scanned,
+            symbols_skipped_market=n_skipped_market,
+            symbols_skipped_brake=n_skipped_brake,
+            signals_generated=n_signals,
+            scan_duration_ms=round(scan_duration_ms, 1),
+            regime=scan_regime,
+            perf_brake_engaged=_perf_brake_engaged,
+        )
+    except Exception as e:
+        logger.debug(f"[scan_log] failed to log scan: {e}")
 
 
 # ── Weekly recap ──────────────────────────────────────────────────────────────

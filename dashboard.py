@@ -12,6 +12,7 @@ from database import (
     get_all_settings, set_setting, get_all_sentiment_cache,
     set_symbol_market, get_accuracy_by_direction, get_wf_results,
     get_rolling_performance, get_equity_curve, get_regime_attribution,
+    get_recent_scans, get_last_scan, get_pipeline_trace,
 )
 
 app = Flask(__name__)
@@ -234,7 +235,8 @@ _HTML = """<!DOCTYPE html>
 
   <!-- Tab navigation -->
   <ul class="nav nav-tabs mb-3" id="mainTabs">
-    <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-overview">Overview</button></li>
+    <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-command">Command</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-overview">Overview</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-ml">ML</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-activity">Learning</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-performance">Performance</button></li>
@@ -243,8 +245,91 @@ _HTML = """<!DOCTYPE html>
 
   <div class="tab-content">
 
+  <!-- ── COMMAND CENTER TAB ──────────────────────────────────────────── -->
+  <div class="tab-pane fade show active" id="tab-command">
+
+    <!-- System health row -->
+    <div class="row g-2 mb-2">
+      <div class="col-6 col-md-3">
+        <div class="ops-card">
+          <div class="ops-label">Dashboard</div>
+          <div class="ops-value"><span class="status-dot status-ok"></span>Running</div>
+          <div class="ops-meta" id="cc-uptime">port 5002</div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="ops-card">
+          <div class="ops-label">Bot Status</div>
+          <div class="ops-value" id="cc-bot-status"><span class="status-dot status-warn"></span>Checking…</div>
+          <div class="ops-meta" id="cc-bot-meta">last activity</div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="ops-card">
+          <div class="ops-label">FinBERT / Sentiment</div>
+          <div class="ops-value" id="cc-finbert-status"><span class="status-dot status-warn"></span>Checking…</div>
+          <div class="ops-meta" id="cc-finbert-meta">local AI service</div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="ops-card">
+          <div class="ops-label">Perf Brake</div>
+          <div class="ops-value" id="cc-brake-status">—</div>
+          <div class="ops-meta" id="cc-brake-meta">20-trade win rate</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Last scan summary -->
+    <div class="card mb-2 p-3">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <div class="section-head mb-0">Last Scan</div>
+        <button class="btn btn-sm" style="background:var(--surface2);color:var(--accent);border:1px solid var(--border)" onclick="refreshCommandCenter()">↻ Refresh</button>
+      </div>
+      <div class="row g-2" id="cc-scan-summary">
+        <div class="col-6 col-md-2"><div class="ops-card"><div class="ops-label">Scanned At</div><div class="ops-value" id="cc-scan-at">—</div></div></div>
+        <div class="col-6 col-md-2"><div class="ops-card"><div class="ops-label">Total Symbols</div><div class="ops-value" id="cc-sym-total">—</div></div></div>
+        <div class="col-6 col-md-2"><div class="ops-card"><div class="ops-label">Evaluated</div><div class="ops-value" id="cc-sym-scanned" style="color:var(--green)">—</div></div></div>
+        <div class="col-6 col-md-2"><div class="ops-card"><div class="ops-label">Skipped (Market)</div><div class="ops-value" id="cc-sym-skipped-mkt" style="color:var(--muted)">—</div></div></div>
+        <div class="col-6 col-md-2"><div class="ops-card"><div class="ops-label">Signals Sent</div><div class="ops-value" id="cc-signals-gen" style="color:var(--accent)">—</div></div></div>
+        <div class="col-6 col-md-2"><div class="ops-card"><div class="ops-label">Duration</div><div class="ops-value" id="cc-scan-dur">—</div></div></div>
+      </div>
+    </div>
+
+    <!-- Scan history chart + table -->
+    <div class="row g-2 mb-2">
+      <div class="col-md-8">
+        <div class="card p-3">
+          <div class="section-head mb-2">Scan History — Signals per Run</div>
+          <canvas id="chart-scan-history" height="100"></canvas>
+        </div>
+      </div>
+      <div class="col-md-4">
+        <div class="card p-3 h-100">
+          <div class="section-head mb-2">Active Training Job</div>
+          <div id="cc-training-job" style="font-size:.82rem;color:var(--muted)">No training running.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Recent scan log table -->
+    <div class="card p-3">
+      <div class="section-head mb-2">Recent Scan Log</div>
+      <div class="table-responsive" style="max-height:300px;overflow-y:auto">
+        <table class="table table-hover mb-0" style="font-size:.76rem">
+          <thead><tr>
+            <th>Time (CET)</th><th>Symbols</th><th>Evaluated</th>
+            <th>Skipped Market</th><th>Signals</th><th>Duration</th><th>Regime</th>
+          </tr></thead>
+          <tbody id="cc-scan-log-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+
   <!-- ── OVERVIEW TAB ─────────────────────────────────────────────────── -->
-  <div class="tab-pane fade show active" id="tab-overview">
+  <div class="tab-pane fade" id="tab-overview">
 
     <!-- Status strip -->
     <div class="card mb-2 px-3 py-2">
@@ -796,7 +881,7 @@ Chart.defaults.plugins.tooltip.bodyColor = '#8b8fa8';
 Chart.defaults.plugins.tooltip.borderColor = '#2a2d3a';
 Chart.defaults.plugins.tooltip.borderWidth = 1;
 
-let dailyChart, symbolChart, bucketsChart, strengthChart, resolutionReasonsChart, resolutionTimeChart, mfeMaeChart, trainRunsChart;
+let dailyChart, symbolChart, bucketsChart, strengthChart, resolutionReasonsChart, resolutionTimeChart, mfeMaeChart, trainRunsChart, scanHistoryChart;
 let _fxRate = 1.0, _fxSymbol = '$';
 async function _loadFx() {
   const fx = await fetch('/api/fx-rate').then(r=>r.json());
@@ -805,6 +890,131 @@ async function _loadFx() {
 }
 function fxPrice(usd) { return (_fxRate * usd).toFixed(2); }
 _loadFx();
+
+// ── Command Center ────────────────────────────────────────────────────────────
+async function refreshCommandCenter() {
+  const data = await fetch('/api/system/status').then(r=>r.json());
+  const ops  = await fetch('/api/ops').then(r=>r.json());
+  const last = data.last_scan;
+  const scans = data.recent_scans || [];
+
+  // Bot health: check last signal or training activity
+  const botEl = document.getElementById('cc-bot-status');
+  const botMeta = document.getElementById('cc-bot-meta');
+  if (ops.last_signal) {
+    const ageH = (Date.now() - new Date(ops.last_signal.sent_at+'Z')) / 3600000;
+    const healthy = ageH < 48;
+    botEl.innerHTML = `<span class="status-dot ${healthy?'status-ok':'status-warn'}"></span>${healthy?'Active':'Idle'}`;
+    botMeta.textContent = `Last signal: ${formatShortTime(ops.last_signal.sent_at)}`;
+  } else if (ops.last_cycle) {
+    const ageH = (Date.now() - new Date(ops.last_cycle.checked_at+'Z')) / 3600000;
+    botEl.innerHTML = `<span class="status-dot ${ageH<2?'status-ok':'status-warn'}"></span>${ageH<2?'Active':'Checking…'}`;
+    botMeta.textContent = `Last ML check: ${formatShortTime(ops.last_cycle.checked_at)}`;
+  } else {
+    botEl.innerHTML = `<span class="status-dot status-bad"></span>No activity`;
+    botMeta.textContent = 'No signals or training logged';
+  }
+
+  // FinBERT
+  const fbEl = document.getElementById('cc-finbert-status');
+  const fbMeta = document.getElementById('cc-finbert-meta');
+  if (data.finbert_ok) {
+    fbEl.innerHTML = `<span class="status-dot status-ok"></span>Online`;
+    fbMeta.textContent = 'FinBERT sentiment service';
+  } else {
+    fbEl.innerHTML = `<span class="status-dot status-bad"></span>Offline`;
+    fbMeta.textContent = 'Check local_finbert setting';
+  }
+
+  // Perf brake
+  const brakeEl = document.getElementById('cc-brake-status');
+  const brakeMeta = document.getElementById('cc-brake-meta');
+  if (last && last.perf_brake_engaged) {
+    brakeEl.innerHTML = `<span class="status-dot status-bad"></span>ENGAGED`;
+    brakeMeta.textContent = 'Halving signal frequency';
+  } else {
+    brakeEl.innerHTML = `<span class="status-dot status-ok"></span>OFF`;
+    brakeMeta.textContent = 'Normal scan frequency';
+  }
+
+  // Last scan
+  if (last) {
+    const atCet = last.scanned_at ? new Date(last.scanned_at+'Z').toLocaleString() : '—';
+    document.getElementById('cc-scan-at').textContent = atCet;
+    document.getElementById('cc-sym-total').textContent = last.symbols_total ?? '—';
+    document.getElementById('cc-sym-scanned').textContent = last.symbols_scanned ?? '—';
+    document.getElementById('cc-sym-skipped-mkt').textContent = last.symbols_skipped_market ?? '—';
+    document.getElementById('cc-signals-gen').textContent = last.signals_generated ?? '—';
+    const dur = last.scan_duration_ms != null ? (last.scan_duration_ms > 1000 ? (last.scan_duration_ms/1000).toFixed(1)+'s' : Math.round(last.scan_duration_ms)+'ms') : '—';
+    document.getElementById('cc-scan-dur').textContent = dur;
+  }
+
+  // Scan history chart
+  const chartData = scans.slice().reverse();
+  const labels = chartData.map(s => s.scanned_at ? new Date(s.scanned_at+'Z').toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '');
+  const sigVals = chartData.map(s => s.signals_generated ?? 0);
+  const evalVals = chartData.map(s => s.symbols_scanned ?? 0);
+  if (!scanHistoryChart) {
+    scanHistoryChart = new Chart(document.getElementById('chart-scan-history'), {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          {label:'Evaluated', data:evalVals, backgroundColor:'#38bdf830', borderColor:'#38bdf8', borderWidth:1, yAxisID:'y2'},
+          {label:'Signals', data:sigVals, backgroundColor:'#4ade80cc', borderColor:'#4ade80', borderWidth:1, yAxisID:'y'},
+        ]
+      },
+      options: {
+        plugins: {legend:{labels:{color:'#8b8fa8'}}},
+        scales: {
+          x: {ticks:{color:'#8b8fa8',maxTicksLimit:15},grid:{color:'#2a2d3a'}},
+          y: {position:'left',ticks:{color:'#4ade80',stepSize:1},grid:{color:'#2a2d3a'},title:{display:true,text:'Signals',color:'#4ade80'}},
+          y2: {position:'right',ticks:{color:'#38bdf8'},grid:{drawOnChartArea:false},title:{display:true,text:'Evaluated',color:'#38bdf8'}},
+        }
+      }
+    });
+  } else {
+    scanHistoryChart.data.labels = labels;
+    scanHistoryChart.data.datasets[0].data = evalVals;
+    scanHistoryChart.data.datasets[1].data = sigVals;
+    scanHistoryChart.update();
+  }
+
+  // Training job
+  const jobEl = document.getElementById('cc-training-job');
+  const job = data.running_job;
+  if (job) {
+    const pct = job.total_symbols > 0 ? Math.round(job.done_symbols / job.total_symbols * 100) : 0;
+    const cur = job.current_symbol ? ` — ${job.current_symbol}` : '';
+    jobEl.innerHTML = `
+      <div style="color:#a78bfa;font-weight:600;margin-bottom:6px">${job.job_type} running${cur}</div>
+      <div class="progress mb-2" style="height:8px">
+        <div class="progress-bar" style="width:${pct}%;background:#a78bfa;transition:width .4s"></div>
+      </div>
+      <div style="color:var(--muted);font-size:.76rem">${job.done_symbols}/${job.total_symbols} symbols · ${pct}%</div>
+      <div style="color:#555;font-size:.72rem;margin-top:4px">Started: ${formatShortTime(job.started_at)}</div>`;
+  } else {
+    jobEl.innerHTML = '<div style="color:#555">No training job running.<br><span style="font-size:.76rem">Use Action Center in Learning tab to start one.</span></div>';
+  }
+
+  // Scan log table
+  const regimeColors = {bull:'#4ade80',bear:'#f87171',volatile:'#fbbf24',unknown:'#555'};
+  document.getElementById('cc-scan-log-body').innerHTML = scans.map(s => {
+    const atStr = s.scanned_at ? new Date(s.scanned_at+'Z').toLocaleString() : '—';
+    const dur = s.scan_duration_ms != null ? (s.scan_duration_ms > 1000 ? (s.scan_duration_ms/1000).toFixed(1)+'s' : Math.round(s.scan_duration_ms)+'ms') : '—';
+    const sigColor = s.signals_generated > 0 ? 'var(--accent)' : 'var(--muted)';
+    const regimeColor = s.regime ? (regimeColors[s.regime] || '#8b8fa8') : '#555';
+    return `<tr>
+      <td style="white-space:nowrap;color:var(--muted)">${atStr}</td>
+      <td>${s.symbols_total ?? '—'}</td>
+      <td style="color:var(--green)">${s.symbols_scanned ?? '—'}</td>
+      <td style="color:var(--muted)">${s.symbols_skipped_market ?? '—'}</td>
+      <td style="color:${sigColor};font-weight:600">${s.signals_generated ?? '—'}</td>
+      <td style="color:var(--muted)">${dur}</td>
+      <td style="color:${regimeColor}">${s.regime || '—'}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="7" class="text-center text-muted">No scan data yet — runs on first scan cycle</td></tr>';
+}
 
 function statusChip(ok, okText, warnText) {
   if (ok === 'ok')   return `<span class="status-dot status-ok d-inline-block"></span><span style="color:var(--green)">${okText}</span>`;
@@ -1784,12 +1994,17 @@ function toggleTheme() {
 })();
 
 // ── Init ──────────────────────────────────────────────────────────────────────
+refreshCommandCenter();
 refreshOverview();
 updateMarketStatus();
+setInterval(refreshCommandCenter, 60000);
 setInterval(refreshOverview, 30000);
 setInterval(refreshOps, 30000);
 setInterval(updateMarketStatus, 60000);
 
+document.querySelectorAll('[data-bs-target="#tab-command"]').forEach(el =>
+  el.addEventListener('shown.bs.tab', () => refreshCommandCenter())
+);
 document.querySelectorAll('[data-bs-target="#tab-overview"]').forEach(el =>
   el.addEventListener('shown.bs.tab', () => refreshOverview())
 );
@@ -2173,6 +2388,47 @@ def api_symbols_set_market(symbol):
         return jsonify({"ok": False, "error": "market must be us, xetra, or crypto"}), 400
     set_symbol_market(symbol.upper(), market)
     return jsonify({"ok": True})
+
+
+@app.route("/api/system/status")
+def api_system_status():
+    """Command Center: scan history, container health, last scan outcome."""
+    import urllib.request as _ur
+    last_scan = get_last_scan()
+    recent_scans = get_recent_scans(50)
+    running_job = get_running_training_job()
+
+    # FinBERT health check
+    settings = get_all_settings()
+    finbert_ok = False
+    if settings.get("sentiment_provider") == "local_finbert":
+        try:
+            url = settings.get("sentiment_local_url", "http://finbert:5001").rstrip("/") + "/health"
+            req = _ur.Request(url)
+            with _ur.urlopen(req, timeout=2) as r:
+                finbert_ok = r.status == 200
+        except Exception:
+            finbert_ok = False
+
+    return jsonify({
+        "last_scan": last_scan,
+        "recent_scans": recent_scans,
+        "running_job": running_job,
+        "finbert_ok": finbert_ok,
+        "perf_brake": False,  # reading from module state not possible cross-process; placeholder
+    })
+
+
+@app.route("/api/pipeline/<symbol>")
+def api_pipeline_trace(symbol):
+    limit = int(request.args.get("limit", 20))
+    return jsonify(get_pipeline_trace(symbol.upper(), limit=limit))
+
+
+@app.route("/api/scan-log")
+def api_scan_log():
+    limit = int(request.args.get("limit", 50))
+    return jsonify(get_recent_scans(limit))
 
 
 if __name__ == "__main__":

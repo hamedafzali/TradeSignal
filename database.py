@@ -168,6 +168,37 @@ def init_db() -> None:
                 ai_win_rate   REAL,
                 grade         TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS scan_log (
+                id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+                scanned_at              TEXT NOT NULL,
+                symbols_total           INTEGER DEFAULT 0,
+                symbols_scanned         INTEGER DEFAULT 0,
+                symbols_skipped_market  INTEGER DEFAULT 0,
+                symbols_skipped_brake   INTEGER DEFAULT 0,
+                signals_generated       INTEGER DEFAULT 0,
+                scan_duration_ms        REAL,
+                regime                  TEXT,
+                perf_brake_engaged      INTEGER DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS pipeline_trace (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id       INTEGER,
+                symbol          TEXT NOT NULL,
+                scanned_at      TEXT NOT NULL,
+                data_ok         INTEGER DEFAULT 1,
+                features_count  INTEGER DEFAULT 0,
+                rule_signal     TEXT,
+                ml_buy_prob     REAL,
+                ml_sell_prob    REAL,
+                meta_conf       REAL,
+                sentiment_score REAL,
+                sentiment_adj   REAL,
+                suppressed      INTEGER DEFAULT 0,
+                suppress_reason TEXT,
+                final_action    TEXT
+            );
         """)
         # Migrate existing positions table if tp/sl columns missing
         cols = [r[1] for r in conn.execute("PRAGMA table_info(positions)").fetchall()]
@@ -1415,6 +1446,66 @@ def get_accuracy_by_direction() -> dict:
             "accuracy": round(r["correct"] / decisive * 100, 1) if decisive > 0 else None,
         }
     return result
+
+
+def log_scan(scanned_at: str, symbols_total: int, symbols_scanned: int,
+             symbols_skipped_market: int, symbols_skipped_brake: int,
+             signals_generated: int, scan_duration_ms: float,
+             regime: str | None = None, perf_brake_engaged: bool = False) -> None:
+    with _conn() as conn:
+        conn.execute("""
+            INSERT INTO scan_log
+                (scanned_at, symbols_total, symbols_scanned, symbols_skipped_market,
+                 symbols_skipped_brake, signals_generated, scan_duration_ms,
+                 regime, perf_brake_engaged)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (scanned_at, symbols_total, symbols_scanned, symbols_skipped_market,
+              symbols_skipped_brake, signals_generated, scan_duration_ms,
+              regime, int(perf_brake_engaged)))
+
+
+def get_recent_scans(limit: int = 20) -> list[dict]:
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT * FROM scan_log ORDER BY id DESC LIMIT ?
+        """, (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_last_scan() -> dict | None:
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM scan_log ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def log_pipeline_trace(symbol: str, scanned_at: str, signal_id: int | None = None,
+                       data_ok: bool = True, features_count: int = 0,
+                       rule_signal: str | None = None, ml_buy_prob: float | None = None,
+                       ml_sell_prob: float | None = None, meta_conf: float | None = None,
+                       sentiment_score: float | None = None, sentiment_adj: float | None = None,
+                       suppressed: bool = False, suppress_reason: str | None = None,
+                       final_action: str | None = None) -> None:
+    with _conn() as conn:
+        conn.execute("""
+            INSERT INTO pipeline_trace
+                (signal_id, symbol, scanned_at, data_ok, features_count,
+                 rule_signal, ml_buy_prob, ml_sell_prob, meta_conf,
+                 sentiment_score, sentiment_adj, suppressed, suppress_reason, final_action)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (signal_id, symbol.upper(), scanned_at, int(data_ok), features_count,
+              rule_signal, ml_buy_prob, ml_sell_prob, meta_conf,
+              sentiment_score, sentiment_adj, int(suppressed), suppress_reason, final_action))
+
+
+def get_pipeline_trace(symbol: str, limit: int = 10) -> list[dict]:
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT * FROM pipeline_trace WHERE symbol = ?
+            ORDER BY id DESC LIMIT ?
+        """, (symbol.upper(), limit)).fetchall()
+        return [dict(r) for r in rows]
 
 
 def log_wf_result(symbol: str, result: dict) -> None:
