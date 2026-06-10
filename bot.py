@@ -2001,9 +2001,11 @@ async def cmd_train(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if str(update.effective_user.id) != ADMIN_CHAT_ID:
         return
     await update.message.reply_text("🧠 Retraining all models with latest outcome data...")
+    # trained=False is the only flag needs_retrain() honors unconditionally —
+    # trained_at=0 is ignored below the live-outcome blend threshold
     for model in models.values():
-        model.trained_at = 0
-    await _ensure_models_trained()
+        model.trained = False
+    await _ensure_models_trained(context.bot)
     await update.message.reply_text("✅ All models retrained.")
 
 
