@@ -527,22 +527,16 @@ def combine_signals(rule_sig: dict | None, ml_result: dict,
         sig["ai_confidence"] = buy_prob if rule_action == "BUY" else sell_prob
         sig["meta_confidence"] = (meta_conf_buy if rule_action == "BUY" else meta_conf_sell)
     elif ai_signal:
-        # Shadow mode (default ON): ML predictions are logged on every signal but
-        # cannot create signals on their own until calibration is demonstrated on
-        # live outcomes. Disable via dashboard setting ml_shadow_mode=false.
+        # Shadow mode (default ON): AI-only signals are fully built and pass
+        # every gate below like a real signal, but are diverted to the
+        # shadow_signals table instead of firing — so their hypothetical
+        # outcomes measure exactly what lifting shadow mode would have done.
+        # Disable via dashboard setting ml_shadow_mode=false.
         try:
             from database import get_setting as _gs
-            shadow = _gs("ml_shadow_mode", "true") == "true"
+            _shadow = _gs("ml_shadow_mode", "true") == "true"
         except Exception:
-            shadow = True
-        if shadow:
-            print(f"[signals] shadow mode: AI-only {ai_signal} {symbol} logged, not fired")
-            try:
-                from database import get_setting as _g2, set_setting as _ss
-                _ss("shadow_suppressed_count", str(int(_g2("shadow_suppressed_count", "0") or 0) + 1))
-            except Exception:
-                pass
-            return None
+            _shadow = True
         prob = buy_prob if ai_signal == "BUY" else sell_prob
         if prob is not None and prob >= 0.70:
             # RSI gate: AI-only BUY must not be overbought; AI-only SELL must not be oversold
@@ -593,6 +587,7 @@ def combine_signals(rule_sig: dict | None, ml_result: dict,
                 "suggested_size_pct": _kelly_size(ai_wr, rr),
                 "meta_confidence": (meta_conf_buy if ai_signal == "BUY" else meta_conf_sell),
             }
+            sig["_shadow"] = _shadow
 
     if sig is None:
         return None
@@ -636,5 +631,16 @@ def combine_signals(rule_sig: dict | None, ml_result: dict,
         meta_confidence=sig.get("meta_confidence"),
     )
     sig["stars"] = _stars(sig["quality"])
+
+    # Shadow divert happens last: the hypothetical signal has passed every gate
+    # a real one would, so its resolved outcome measures live AI-only skill.
+    if sig.pop("_shadow", False):
+        print(f"[signals] shadow mode: AI-only {sig['action']} {symbol} logged, not fired")
+        try:
+            from database import log_shadow_signal
+            log_shadow_signal(sig)
+        except Exception as exc:
+            print(f"[signals] shadow log failed for {symbol}: {exc}")
+        return None
 
     return sig

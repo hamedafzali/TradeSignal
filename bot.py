@@ -42,6 +42,9 @@ from database import (
     get_recent_action_requests,
     get_pending_outcomes,
     get_pending_outcomes_recent,
+    get_pending_shadow_signals,
+    get_shadow_stats,
+    update_shadow_outcome,
     get_stats,
     get_subscribers_for_symbol,
     get_user_open_positions,
@@ -608,6 +611,27 @@ async def check_outcomes(context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as e:
             logger.error(f"Outcome check error signal {sig['id']}: {e}")
 
+    # Resolve hypothetical outcomes for shadow-suppressed AI-only signals.
+    # Same resolver, same TP/SL-touch semantics — no notifications, just data.
+    try:
+        shadow_pending = get_pending_shadow_signals(min_age_hours=1.0)
+        n_resolved = 0
+        for srow in shadow_pending:
+            sig_like = dict(srow)
+            sig_like["sent_at"] = srow["created_at"]
+            resolved = _resolve_signal_outcome(sig_like)
+            if resolved is None:
+                continue
+            update_shadow_outcome(
+                srow["id"], resolved["outcome"], resolved["price"],
+                resolution_reason=resolved.get("metadata", {}).get("resolution_reason"),
+            )
+            n_resolved += 1
+        if n_resolved:
+            logger.info(f"[shadow] resolved {n_resolved} hypothetical outcomes")
+    except Exception as e:
+        logger.error(f"[shadow] outcome resolution failed: {e}")
+
 
 # ── Continuous learning ───────────────────────────────────────────────────────
 
@@ -653,9 +677,18 @@ async def ml_health_report(context: ContextTypes.DEFAULT_TYPE) -> None:
         auc_bottom = [f"  🔴 `{s}` {a:.2f}" for s, a in aucs[-3:]] if len(aucs) > 5 else []
         n_skilled = sum(1 for _, a in aucs if a >= _AI_MIN_HOLDOUT_AUC)
 
-        # Shadow-mode suppressions since last report (counter resets each report)
-        shadow_n = get_setting("shadow_suppressed_count", "0") or "0"
-        set_setting("shadow_suppressed_count", "0")
+        # Shadow-mode hypothetical performance: would the suppressed AI-only
+        # signals have won? This is the evidence for lifting shadow mode.
+        sh = get_shadow_stats()
+        if sh["resolved"] > 0:
+            shadow_line = (
+                f"`{sh['week']}` suppressed this week · hypothetical record "
+                f"`{sh['correct']}W/{sh['incorrect']}L` (`{sh['win_rate']}%`) "
+                f"· `{sh['pending']}` pending"
+            )
+        else:
+            shadow_line = (f"`{sh['week']}` suppressed this week · "
+                           f"`{sh['pending']}` awaiting hypothetical resolution")
 
         wk = get_weekly_stats()
         wr_line = (f"`{wk['accuracy']}%` ({wk['correct']}/{wk['resolved']})"
@@ -668,7 +701,7 @@ async def ml_health_report(context: ContextTypes.DEFAULT_TYPE) -> None:
             + "\n".join(progress_lines) + "\n\n"
             f"*Holdout AUC* ({n_skilled}/{len(aucs)} symbols ≥ {_AI_MIN_HOLDOUT_AUC}):\n"
             + "\n".join(auc_top + auc_bottom) + "\n\n"
-            f"*Shadow mode:* `{shadow_n}` AI-only signals suppressed this week\n"
+            f"*Shadow mode:* {shadow_line}\n"
             f"*7d win rate:* {wr_line}"
         )
         await context.bot.send_message(
@@ -676,6 +709,29 @@ async def ml_health_report(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
     except Exception as e:
         logger.error(f"[ml_health] report failed: {e}")
+
+
+async def weekly_pooled_retrain(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Weekly refresh of the pooled cross-symbol 5m model (Sunday, market
+    closed). Runs in a thread; predict() picks up the new pickle via mtime."""
+    try:
+        import asyncio
+        from ml_signals import train_pooled_5m
+        symbols = get_active_symbols()
+        logger.info(f"[pooled] weekly retrain starting ({len(symbols)} symbols)")
+        payload = await asyncio.to_thread(train_pooled_5m, symbols)
+        if payload and ADMIN_CHAT_ID:
+            per = payload["per_symbol"]
+            n_use = sum(1 for v in per.values() if v["use_pooled"])
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=(f"🧬 *Pooled 5m model retrained*\n"
+                      f"`{payload['n_samples']:,}` samples · active for "
+                      f"`{n_use}/{len(per)}` symbols"),
+                parse_mode="Markdown",
+            )
+    except Exception as e:
+        logger.error(f"[pooled] weekly retrain failed: {e}")
 
 
 async def nightly_db_backup(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2275,6 +2331,10 @@ def main() -> None:
     app.job_queue.run_daily(ml_health_report,
                             time=datetime.strptime("09:05", "%H:%M").time(),
                             days=(0,))
+    # Pooled cross-symbol 5m model refresh: Sunday 02:30 UTC (markets closed)
+    app.job_queue.run_daily(weekly_pooled_retrain,
+                            time=datetime.strptime("02:30", "%H:%M").time(),
+                            days=(6,))
 
     logger.info(f"Bot @{BOT_USERNAME} started — channel: {CHANNEL_ID}")
     app.run_polling()

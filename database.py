@@ -244,6 +244,25 @@ def init_db() -> None:
                 suppress_reason TEXT,
                 final_action    TEXT
             );
+
+            -- AI-only signals suppressed by shadow mode, tracked so their
+            -- hypothetical outcomes can be resolved: the evidence base for
+            -- deciding whether (and per-symbol where) to lift shadow mode.
+            CREATE TABLE IF NOT EXISTS shadow_signals (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol            TEXT NOT NULL,
+                action            TEXT NOT NULL,
+                price             REAL NOT NULL,
+                tp                REAL,
+                sl                REAL,
+                ai_confidence     REAL,
+                quality           INTEGER DEFAULT 0,
+                created_at        TEXT NOT NULL,
+                outcome           TEXT DEFAULT 'pending',
+                outcome_price     REAL,
+                outcome_at        TEXT,
+                resolution_reason TEXT
+            );
         """)
         # Migrate existing positions table if tp/sl columns missing
         cols = [r[1] for r in conn.execute("PRAGMA table_info(positions)").fetchall()]
@@ -377,6 +396,83 @@ def get_pending_outcomes_recent(min_age_hours: float = 1.0) -> list[dict]:
             (cutoff,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def log_shadow_signal(sig: dict) -> None:
+    """Record an AI-only signal suppressed by shadow mode. Dedups against a
+    pending shadow signal for the same symbol+action in the last 6h (mirrors
+    the live dedup), so a persistent AI opinion logs once, not every scan."""
+    cutoff = (datetime.utcnow() - timedelta(hours=6)).isoformat()
+    with _conn() as conn:
+        dup = conn.execute(
+            """SELECT 1 FROM shadow_signals
+               WHERE symbol = ? AND action = ? AND created_at >= ? LIMIT 1""",
+            (sig["symbol"], sig["action"], cutoff),
+        ).fetchone()
+        if dup:
+            return
+        conn.execute(
+            """INSERT INTO shadow_signals
+               (symbol, action, price, tp, sl, ai_confidence, quality, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (sig["symbol"], sig["action"], sig["price"], sig.get("tp"),
+             sig.get("sl"), sig.get("ai_confidence"), sig.get("quality", 0),
+             datetime.utcnow().isoformat()),
+        )
+
+
+def get_pending_shadow_signals(min_age_hours: float = 1.0) -> list[dict]:
+    cutoff = (datetime.utcnow() - timedelta(hours=min_age_hours)).isoformat()
+    with _conn() as conn:
+        rows = conn.execute(
+            """SELECT * FROM shadow_signals
+               WHERE outcome = 'pending' AND created_at <= ?
+                 AND tp IS NOT NULL AND sl IS NOT NULL""",
+            (cutoff,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_shadow_outcome(shadow_id: int, outcome: str, outcome_price: float,
+                          resolution_reason: str | None = None) -> None:
+    with _conn() as conn:
+        conn.execute(
+            """UPDATE shadow_signals
+               SET outcome = ?, outcome_price = ?, outcome_at = ?, resolution_reason = ?
+               WHERE id = ?""",
+            (outcome, outcome_price, datetime.utcnow().isoformat(),
+             resolution_reason, shadow_id),
+        )
+
+
+def get_shadow_stats() -> dict:
+    """Hypothetical performance of shadow-suppressed AI-only signals."""
+    week_cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
+    with _conn() as conn:
+        row = conn.execute("""
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN outcome='correct'   THEN 1 ELSE 0 END) AS correct,
+                   SUM(CASE WHEN outcome='incorrect' THEN 1 ELSE 0 END) AS incorrect,
+                   SUM(CASE WHEN outcome='neutral'   THEN 1 ELSE 0 END) AS neutral,
+                   SUM(CASE WHEN outcome='pending'   THEN 1 ELSE 0 END) AS pending
+            FROM shadow_signals
+        """).fetchone()
+        week = conn.execute(
+            "SELECT COUNT(*) FROM shadow_signals WHERE created_at >= ?",
+            (week_cutoff,),
+        ).fetchone()[0]
+    resolved = (row["correct"] or 0) + (row["incorrect"] or 0)
+    win_rate = round((row["correct"] or 0) / resolved * 100, 1) if resolved else None
+    return {
+        "total": row["total"] or 0,
+        "correct": row["correct"] or 0,
+        "incorrect": row["incorrect"] or 0,
+        "neutral": row["neutral"] or 0,
+        "pending": row["pending"] or 0,
+        "resolved": resolved,
+        "win_rate": win_rate,
+        "week": week,
+    }
 
 
 def get_outcome_count(symbol: str | None = None) -> int:

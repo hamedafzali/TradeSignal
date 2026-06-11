@@ -341,6 +341,152 @@ def build_labels_tpsl(df: pd.DataFrame,
             pd.Series(ys, index=df.index, dtype=float))
 
 
+# ── Pooled cross-symbol 5m model ──────────────────────────────────────────────
+# One model trained on synthetic labels pooled across all symbols (~200K+
+# samples vs ~4.5K per symbol). Features are scale-free so they pool naturally.
+# Per symbol it is only USED when it beats that symbol's own 5m model on the
+# same held-out tail — measured, not assumed.
+
+POOLED_5M_PATH = os.path.join(CACHE_DIR, "_pooled_5m.pkl")
+_pooled_5m_cache: dict = {"model": None, "mtime": 0.0}
+
+
+def get_pooled_5m() -> dict | None:
+    """Lazily load the pooled 5m model; reloads when the pickle changes on
+    disk so a retrain in another process is picked up without a restart."""
+    try:
+        mtime = os.path.getmtime(POOLED_5M_PATH)
+    except OSError:
+        return None
+    if _pooled_5m_cache["model"] is None or mtime > _pooled_5m_cache["mtime"]:
+        try:
+            with open(POOLED_5M_PATH, "rb") as f:
+                _pooled_5m_cache["model"] = pickle.load(f)
+            _pooled_5m_cache["mtime"] = mtime
+            n_use = sum(1 for v in _pooled_5m_cache["model"].get("per_symbol", {}).values()
+                        if v.get("use_pooled"))
+            logger.info(f"[ML] Loaded pooled 5m model (active for {n_use} symbols)")
+        except Exception as e:
+            logger.warning(f"[ML] Pooled model load failed: {e}")
+            return None
+    return _pooled_5m_cache["model"]
+
+
+def train_pooled_5m(symbols: list[str]) -> dict | None:
+    """
+    Train the pooled cross-symbol 5m model and decide per symbol whether it
+    beats the symbol's own 5m model (raw-classifier AUC on the same embargoed
+    tail, which neither model's classifier was fitted on). Saves the pickle
+    and returns the per-symbol comparison.
+    """
+    from sklearn.metrics import roc_auc_score
+
+    spy_df, vix_df = _get_market_ctx()
+    frames: dict[str, pd.DataFrame] = {}
+    common_cols: set | None = None
+
+    for sym in symbols:
+        try:
+            df = yf.download(sym, period="60d", interval="5m",
+                             progress=False, auto_adjust=True)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(1)
+            if len(df) < 500:
+                continue
+            feats = build_features(df, spy_df=spy_df, vix_df=vix_df,
+                                   sector_df=_get_sector_ctx(sym))
+            yb, ys = build_labels_tpsl(df)
+            combined = pd.concat(
+                [feats, yb.rename("y_buy"), ys.rename("y_sell")], axis=1
+            ).dropna()
+            if len(combined) < 500:
+                continue
+            cols = {c for c in combined.columns if c not in ("y_buy", "y_sell")}
+            common_cols = cols if common_cols is None else common_cols & cols
+            frames[sym] = combined
+        except Exception as e:
+            logger.warning(f"[pooled] {sym}: data error: {e}")
+
+    if len(frames) < 5 or not common_cols:
+        logger.warning("[pooled] not enough symbols with data — aborting")
+        return None
+    pool_cols = sorted(common_cols)
+
+    _EMBARGO = 24
+    main_X, main_yb, main_ys = [], [], []
+    tails: dict[str, tuple] = {}
+    for sym, comb in frames.items():
+        X = comb[pool_cols].values
+        yb = comb["y_buy"].values
+        ys = comb["y_sell"].values
+        n_tail = max(100, len(X) // 5)
+        if n_tail + _EMBARGO >= len(X) - 200:
+            continue
+        main_X.append(X[:-(n_tail + _EMBARGO)])
+        main_yb.append(yb[:-(n_tail + _EMBARGO)])
+        main_ys.append(ys[:-(n_tail + _EMBARGO)])
+        tails[sym] = (comb.iloc[-n_tail:], yb[-n_tail:], ys[-n_tail:])
+
+    X_pool = np.vstack(main_X)
+    yb_pool = np.concatenate(main_yb)
+    ys_pool = np.concatenate(main_ys)
+    logger.info(f"[pooled] training on {len(X_pool):,} samples from {len(tails)} symbols")
+
+    scaler = StandardScaler()
+    Xs = scaler.fit_transform(X_pool)
+    # subsample adds stochastic regularisation, sensible at this sample size
+    clf_buy = GradientBoostingClassifier(n_estimators=200, max_depth=3,
+                                         learning_rate=0.05, subsample=0.8,
+                                         random_state=42)
+    clf_sell = GradientBoostingClassifier(n_estimators=200, max_depth=3,
+                                          learning_rate=0.05, subsample=0.8,
+                                          random_state=42)
+    clf_buy.fit(Xs, yb_pool)
+    clf_sell.fit(Xs, ys_pool)
+
+    per_symbol: dict[str, dict] = {}
+    for sym, (tail_df, yb_t, ys_t) in tails.items():
+        entry: dict = {"auc_pooled": None, "auc_own": None, "use_pooled": False}
+        try:
+            Xt = scaler.transform(tail_df[pool_cols].values)
+            if len(np.unique(yb_t)) > 1:
+                entry["auc_pooled"] = float(
+                    roc_auc_score(yb_t, clf_buy.predict_proba(Xt)[:, 1]))
+            # Own model on the same tail: fill its missing feature columns with
+            # 0.0, exactly as predict() does at inference time.
+            own = StockModel(sym)
+            if own.trained_5m and own.feature_cols_5m and len(np.unique(yb_t)) > 1:
+                own_rows = np.array([
+                    [float(tail_df[c].iloc[i]) if c in tail_df.columns else 0.0
+                     for c in own.feature_cols_5m]
+                    for i in range(len(tail_df))
+                ])
+                Xo = own.scaler_5m.transform(own_rows)
+                entry["auc_own"] = float(
+                    roc_auc_score(yb_t, own.clf_buy_5m.predict_proba(Xo)[:, 1]))
+            ap, ao = entry["auc_pooled"], entry["auc_own"]
+            entry["use_pooled"] = (ap is not None and ap > 0.5
+                                   and (ao is None or ap > ao))
+        except Exception as e:
+            logger.warning(f"[pooled] {sym}: evaluation error: {e}")
+        per_symbol[sym] = entry
+
+    payload = {
+        "feature_cols": pool_cols,
+        "scaler": scaler,
+        "clf_buy": clf_buy,
+        "clf_sell": clf_sell,
+        "per_symbol": per_symbol,
+        "n_samples": len(X_pool),
+        "trained_at": time.time(),
+    }
+    with open(POOLED_5M_PATH, "wb") as f:
+        pickle.dump(payload, f)
+    n_use = sum(1 for v in per_symbol.values() if v["use_pooled"])
+    logger.info(f"[pooled] saved — pooled model wins on {n_use}/{len(per_symbol)} symbols")
+    return payload
+
+
 class StockModel:
     def __init__(self, symbol: str):
         self.symbol = symbol
@@ -837,8 +983,21 @@ class StockModel:
         """
         default = {"buy_prob": None, "sell_prob": None, "ai_signal": None}
 
+        # Pooled cross-symbol model takes precedence on 5m when it measurably
+        # beat this symbol's own model on the held-out tail (use_pooled flag).
+        used_pooled = False
+        pooled = get_pooled_5m() if timeframe == "5m" else None
+        pooled_cfg = (pooled or {}).get("per_symbol", {}).get(self.symbol, {})
+
         use_5m = (timeframe == "5m") and self.trained_5m and self.feature_cols_5m
-        if use_5m:
+        if pooled is not None and pooled_cfg.get("use_pooled"):
+            trained_ok   = True
+            feature_cols = pooled["feature_cols"]
+            scaler       = pooled["scaler"]
+            buy_clf      = pooled["clf_buy"]
+            sell_clf     = pooled["clf_sell"]
+            used_pooled  = True
+        elif use_5m:
             trained_ok   = self.trained_5m
             feature_cols = self.feature_cols_5m
             scaler       = self.scaler_5m
@@ -854,8 +1013,13 @@ class StockModel:
         if not trained_ok or not feature_cols:
             return default
 
-        meta_buy_clf  = (self.clf_meta_buy_5m  if use_5m else self.clf_meta_buy)
-        meta_sell_clf = (self.clf_meta_sell_5m if use_5m else self.clf_meta_sell)
+        # Per-symbol meta-classifiers expect the symbol's own feature layout —
+        # incompatible with pooled feature columns, so meta is off when pooled.
+        if used_pooled:
+            meta_buy_clf = meta_sell_clf = None
+        else:
+            meta_buy_clf  = (self.clf_meta_buy_5m  if use_5m else self.clf_meta_buy)
+            meta_sell_clf = (self.clf_meta_sell_5m if use_5m else self.clf_meta_sell)
 
         try:
             spy_df, vix_df = _get_market_ctx()
