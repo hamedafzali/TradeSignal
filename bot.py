@@ -132,6 +132,34 @@ def _get_display_currency() -> tuple[str, str, float]:
     rate = _get_fx_rate(currency)
     return currency, symbol, rate
 
+# yfinance quotes each ticker in its exchange's native currency. A blanket
+# USD→display rate double-converts European stocks (their prices are already
+# EUR), so conversion must be native→display per symbol.
+_NATIVE_CCY_SUFFIX = {
+    ".DE": "EUR", ".F": "EUR", ".PA": "EUR", ".MI": "EUR", ".AS": "EUR",
+    ".MC": "EUR", ".BR": "EUR", ".LS": "EUR", ".VI": "EUR", ".HE": "EUR",
+    ".SW": "CHF", ".CO": "DKK", ".ST": "SEK", ".OL": "NOK", ".L": "GBP",
+}
+
+def _native_currency(symbol: str) -> str:
+    s = symbol.upper()
+    for sfx, ccy in _NATIVE_CCY_SUFFIX.items():
+        if s.endswith(sfx):
+            return ccy
+    return "USD"  # US stocks and crypto pairs quote in USD
+
+def _symbol_fx(symbol: str) -> tuple[str, float]:
+    """Return (display currency sign, native→display conversion rate)."""
+    display = get_setting("display_currency", "USD").upper()
+    cs = _CURRENCY_SYMBOLS.get(display, display + " ")
+    native = _native_currency(symbol)
+    if native == display:
+        return cs, 1.0
+    usd_to_native = _get_fx_rate(native)
+    if usd_to_native <= 0:
+        return cs, 1.0
+    return cs, _get_fx_rate(display) / usd_to_native
+
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "")
@@ -564,12 +592,14 @@ async def check_outcomes(context: ContextTypes.DEFAULT_TYPE) -> None:
             emoji = {"correct": "✅", "incorrect": "❌", "neutral": "➖"}.get(outcome, "❓")
 
             if ADMIN_CHAT_ID and get_setting("outcome_notify_admin", "false") == "true":
-                tp_text = f"\nTP: `${tp:.2f}` | SL: `${sig.get('sl', 0):.2f}`" if tp else ""
+                cs, fxr = _symbol_fx(sig["symbol"])
+                tp_text = (f"\nTP: `{cs}{tp * fxr:.2f}` | SL: `{cs}{sig.get('sl', 0) * fxr:.2f}`"
+                           if tp else "")
                 await context.bot.send_message(
                     chat_id=ADMIN_CHAT_ID,
                     text=(
                         f"{emoji} *Outcome — {sig['symbol']} {sig['action']}*\n"
-                        f"Entry: `${entry:.2f}` → Now: `${current_price:.2f}` ({sign}{pct:.2f}%)"
+                        f"Entry: `{cs}{entry * fxr:.2f}` → Now: `{cs}{current_price * fxr:.2f}` ({sign}{pct:.2f}%)"
                         f"{tp_text}\n"
                         f"Result: *{outcome.upper()}*"
                     ),
@@ -1222,7 +1252,7 @@ async def _broadcast_signal(bot, sig: dict, session: str = "open") -> None:
     if not CHANNEL_ID:
         return
     # Channel is always English expert — language personalisation is for private DMs only
-    _, cs, fx = _get_display_currency()
+    cs, fx = _symbol_fx(sig["symbol"])
     body = signal_msg(sig, lang="en", mode="expert", currency_symbol=cs, fx_rate=fx)
     cet_time = datetime.now(CET).strftime("%H:%M")
     tz_label = "CEST" if datetime.now(CET).dst() else "CET"
@@ -1266,7 +1296,7 @@ async def _send_private_sell(bot, user_id: str, sig: dict) -> None:
 
 async def _send_subscriber_alert(bot, user_id: str, sig: dict) -> None:
     pref = get_user_pref(user_id)
-    _, cs, fx = _get_display_currency()
+    cs, fx = _symbol_fx(sig["symbol"])
     msg = signal_msg(sig, lang=pref["lang"], mode=pref["mode"], currency_symbol=cs, fx_rate=fx)
     try:
         await bot.send_message(chat_id=user_id, text=msg, parse_mode="Markdown")
