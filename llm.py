@@ -158,22 +158,30 @@ def llm_complete(task: str, user: str, system: str = "",
 
     t0 = time.time()
     ok, in_tok, out_tok, result = False, 0, 0, None
+    response_text = None
+    request_text = (f"[system]\n{system}\n\n[user]\n{user}" if system
+                    else f"[user]\n{user}")
     try:
         call = _call_mistral if provider == "mistral" else _call_anthropic
         text, in_tok, out_tok = call(model, system, user, want_json, max_tokens)
+        response_text = text
         result = _extract_json(text) if want_json else text
         ok = result is not None
         if not ok:
             logger.warning(f"[llm] {task}: unparseable JSON response")
     except urllib.error.HTTPError as e:
-        logger.error(f"[llm] {task} HTTP {e.code}: {e.read().decode()[:200]}")
+        err = e.read().decode()[:500]
+        response_text = f"[HTTP {e.code}] {err}"
+        logger.error(f"[llm] {task} HTTP {e.code}: {err[:200]}")
     except Exception as e:
+        response_text = f"[error] {e}"
         logger.error(f"[llm] {task} failed: {e}")
 
     try:
         from database import log_llm_call
         log_llm_call(task, provider, model, in_tok, out_tok, ok,
-                     round((time.time() - t0) * 1000))
+                     round((time.time() - t0) * 1000),
+                     request_text=request_text, response_text=response_text)
     except Exception:
         pass
     return result

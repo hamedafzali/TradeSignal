@@ -2894,6 +2894,19 @@ def api_ml_stats():
     return jsonify(get_ml_accuracy_stats())
 
 
+@app.route("/api/llm/logs")
+def api_llm_logs():
+    """Full LLM transcript log: what was sent, what came back, tokens, latency.
+    Optional query params: ?task=postmortem|analyst  &limit=N (max 200)."""
+    from database import get_llm_logs
+    task = (request.args.get("task") or "").strip() or None
+    try:
+        limit = min(int(request.args.get("limit", "50")), 200)
+    except ValueError:
+        limit = 50
+    return jsonify(get_llm_logs(limit=limit, task=task))
+
+
 @app.route("/api/ml-activity")
 def api_ml_activity():
     symbol = (request.args.get("symbol") or "").strip().upper() or None

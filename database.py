@@ -344,6 +344,14 @@ def init_db() -> None:
         shadow_cols = [r[1] for r in conn.execute("PRAGMA table_info(shadow_signals)").fetchall()]
         if shadow_cols and "source" not in shadow_cols:
             conn.execute("ALTER TABLE shadow_signals ADD COLUMN source TEXT DEFAULT 'shadow_ai'")
+        # llm_calls request/response transcript columns (audit log of what was
+        # sent to and received from the LLM provider)
+        llm_cols = [r[1] for r in conn.execute("PRAGMA table_info(llm_calls)").fetchall()]
+        if llm_cols:
+            if "request" not in llm_cols:
+                conn.execute("ALTER TABLE llm_calls ADD COLUMN request TEXT")
+            if "response" not in llm_cols:
+                conn.execute("ALTER TABLE llm_calls ADD COLUMN response TEXT")
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────
@@ -534,16 +542,38 @@ def get_shadow_stats(source: str = "shadow_ai") -> dict:
     }
 
 
+_LLM_LOG_MAX_CHARS = 20_000  # per field — keeps the audit log bounded
+
+
 def log_llm_call(task: str, provider: str, model: str, input_tokens: int,
-                 output_tokens: int, ok: bool, latency_ms: int) -> None:
+                 output_tokens: int, ok: bool, latency_ms: int,
+                 request_text: str | None = None,
+                 response_text: str | None = None) -> None:
     with _conn() as conn:
         conn.execute(
             """INSERT INTO llm_calls
-               (task, provider, model, input_tokens, output_tokens, ok, latency_ms, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               (task, provider, model, input_tokens, output_tokens, ok,
+                latency_ms, created_at, request, response)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (task, provider, model, input_tokens, output_tokens,
-             1 if ok else 0, latency_ms, datetime.utcnow().isoformat()),
+             1 if ok else 0, latency_ms, datetime.utcnow().isoformat(),
+             (request_text or "")[:_LLM_LOG_MAX_CHARS] or None,
+             (response_text or "")[:_LLM_LOG_MAX_CHARS] or None),
         )
+
+
+def get_llm_logs(limit: int = 50, task: str | None = None) -> list[dict]:
+    """Full LLM transcript log, newest first."""
+    with _conn() as conn:
+        if task:
+            rows = conn.execute(
+                "SELECT * FROM llm_calls WHERE task = ? ORDER BY id DESC LIMIT ?",
+                (task, limit)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM llm_calls ORDER BY id DESC LIMIT ?",
+                (limit,)).fetchall()
+        return [dict(r) for r in rows]
 
 
 def get_llm_usage_stats(days: int = 30) -> dict:
