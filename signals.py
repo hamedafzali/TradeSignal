@@ -659,10 +659,13 @@ SWING_HORIZON_DAYS = 10   # trading days before timeout -> neutral
 
 
 def swing_signal_from_df(symbol: str, df: pd.DataFrame,
-                         entry_price: float | None = None) -> dict | None:
+                         entry_price: float | None = None,
+                         tp_mult: float = SWING_TP_MULT,
+                         sl_mult: float = SWING_SL_MULT) -> dict | None:
     """
     BUY when a dip inside an established uptrend shows a recovery bar.
-      Trend:    close > SMA200  and  EMA20 rising over the last 5 bars
+      Trend:    stacked — close > SMA50 > SMA200, EMA20 rising over 5 bars
+                (bare "above SMA200" admits sideways chop)
       Dip:      within the last 5 bars, low touched EMA20 or RSI14 dipped < 45
       Trigger:  RSI rising, close up on the day, MACD histogram rising
     Evaluated on COMPLETED daily bars only (last row dropped if today's bar
@@ -676,6 +679,7 @@ def swing_signal_from_df(symbol: str, df: pd.DataFrame,
     low   = df["Low"].squeeze().astype(float)
 
     sma200 = close.rolling(200).mean()
+    sma50  = close.rolling(50).mean()
     ema20  = close.ewm(span=20, adjust=False).mean()
     rsi    = _rsi(close)
     macd_line, sig_line = _macd(close)
@@ -687,7 +691,8 @@ def swing_signal_from_df(symbol: str, df: pd.DataFrame,
     if pd.isna(atr_v) or atr_v <= 0 or pd.isna(sma200.iloc[-1]):
         return None
 
-    uptrend = c > float(sma200.iloc[-1]) and float(ema20.iloc[-1]) > float(ema20.iloc[-6])
+    uptrend = (c > float(sma50.iloc[-1]) > float(sma200.iloc[-1])
+               and float(ema20.iloc[-1]) > float(ema20.iloc[-6]))
     dipped  = bool((low.iloc[-5:] <= ema20.iloc[-5:]).any()
                    or (rsi.iloc[-5:] < 45).any())
     rsi_now, rsi_prev = float(rsi.iloc[-1]), float(rsi.iloc[-2])
@@ -700,11 +705,11 @@ def swing_signal_from_df(symbol: str, df: pd.DataFrame,
         return None
 
     entry = float(entry_price) if entry_price else c
-    sl = round(entry - atr_v * SWING_SL_MULT, 2)
-    tp = round(entry + atr_v * SWING_TP_MULT, 2)
+    sl = round(entry - atr_v * sl_mult, 2)
+    tp = round(entry + atr_v * tp_mult, 2)
     tp_pct = round((tp - entry) / entry * 100, 2)
     sl_pct = round((entry - sl) / entry * 100, 2)
-    rr = round(SWING_TP_MULT / SWING_SL_MULT, 1)
+    rr = round(tp_mult / sl_mult, 1)
 
     # Quality: trend distance + dip depth + momentum agreement
     q = 2

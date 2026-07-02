@@ -26,8 +26,11 @@ MIN_AGG_EXPECTANCY = 0.10  # aggregate avg R per trade
 EXCLUDE_N = 5              # symbol excluded when n >= this and expectancy < 0
 
 
-def backtest_symbol(symbol: str) -> dict | None:
-    df = fetch_ohlc(symbol, period="2y", interval="1d")
+def backtest_symbol(symbol: str, tp_mult: float = SWING_TP_MULT,
+                    sl_mult: float = SWING_SL_MULT,
+                    df=None) -> dict | None:
+    if df is None:
+        df = fetch_ohlc(symbol, period="2y", interval="1d")
     if df is None or len(df) < 260:
         return None
 
@@ -39,7 +42,8 @@ def backtest_symbol(symbol: str) -> dict | None:
     trades = []
     i = 210
     while i < n - 1:
-        sig = swing_signal_from_df(symbol, df.iloc[: i + 1])
+        sig = swing_signal_from_df(symbol, df.iloc[: i + 1],
+                                   tp_mult=tp_mult, sl_mult=sl_mult)
         if sig is None:
             i += 1
             continue
@@ -94,9 +98,25 @@ def backtest_symbol(symbol: str) -> dict | None:
 
 def main() -> None:
     apply = "--apply" in sys.argv
+    grid = "--grid" in sys.argv
     from database import get_active_symbols, set_swing_enabled
 
     symbols = get_active_symbols()
+
+    if grid:
+        # Robustness check across TP geometry — the strategy should not live
+        # or die on one parameter value. Data downloaded once per symbol.
+        frames = {s: fetch_ohlc(s, period="2y", interval="1d") for s in symbols}
+        for tp in (2.0, 2.5):
+            rs = [backtest_symbol(s, tp_mult=tp, df=frames[s]) for s in symbols]
+            rs = [r for r in rs if r and r["n"] > 0]
+            n_all = sum(r["n"] for r in rs)
+            e = sum(r["expectancy_r"] * r["n"] for r in rs) / n_all if n_all else 0
+            w = sum(r["wins"] for r in rs); l = sum(r["losses"] for r in rs)
+            wr = 100 * w / (w + l) if (w + l) else 0
+            print(f"TP {tp}xATR: {n_all} trades · WR {wr:.1f}% · E {e:+.3f}R")
+        return
+
     print(f"Backtesting swing rule on {len(symbols)} symbols "
           f"(2y daily, TP {SWING_TP_MULT}xATR / SL {SWING_SL_MULT}xATR, "
           f"{SWING_HORIZON_DAYS}d horizon)\n")
