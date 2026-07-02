@@ -353,6 +353,7 @@ def _signal_beginner(sig: dict, lang: str, action_emoji: str,
         entry_label = "قیمت خرید" if action == "BUY" else "قیمت فروش"
         strength_tip = {
             "STRONG": "هوش مصنوعی و تحلیل تکنیکال هر دو این سیگنال را تأیید کردند.",
+            "SWING": "سیگنال نوسانی چندروزه بر اساس روند صعودی و اصلاح قیمت روزانه.",
             "AI": "هوش مصنوعی این الگو را شناسایی کرد.",
             "RULE": "تحلیل تکنیکال این سیگنال را تأیید کرد.",
         }.get(strength, "")
@@ -375,6 +376,7 @@ def _signal_beginner(sig: dict, lang: str, action_emoji: str,
         entry_label = "Buy at:" if action == "BUY" else "Sell at:"
         strength_tip = {
             "STRONG": "Both AI and technical rules agree on this signal.",
+            "SWING": "Multi-day swing setup: pullback recovery inside a daily uptrend.",
             "AI": "AI model detected this pattern with high confidence.",
             "RULE": "Technical indicators confirmed this signal.",
         }.get(strength, "")
@@ -433,7 +435,7 @@ def _signal_expert(sig: dict, lang: str, action_emoji: str,
 
     if lang == "fa":
         action_word = "خرید" if action == "BUY" else "فروش"
-        str_labels = {"STRONG": "قوانین + هوش مصنوعی ✦", "AI": "فقط هوش مصنوعی", "RULE": "تکنیکال"}
+        str_labels = {"STRONG": "قوانین + هوش مصنوعی ✦", "AI": "فقط هوش مصنوعی", "RULE": "تکنیکال", "SWING": "نوسانی (روزانه)"}
         ai_line = f"\nهوش مصنوعی: `{ai_conf*100:.0f}٪` اطمینان" if ai_conf else ""
         mtf_line = "\n✅ تأیید چند تایم‌فریمی (۱ساعته+۵دقیقه)" if mtf else ""
         return (
@@ -453,7 +455,7 @@ def _signal_expert(sig: dict, lang: str, action_emoji: str,
             f"━━━━━━━━━━━━━━━━━━━"
         )
     else:
-        str_labels = {"STRONG": "Rules + AI ✦", "AI": "AI only", "RULE": "Technical"}
+        str_labels = {"STRONG": "Rules + AI ✦", "AI": "AI only", "RULE": "Technical", "SWING": "Swing (daily)"}
         ai_line = f"\nAI: `{ai_conf*100:.0f}%` confident" if ai_conf else ""
         mtf_line = "\n✅ Multi-timeframe confirmed (1h+5m)" if mtf else ""
         return (

@@ -280,6 +280,7 @@ def init_db() -> None:
             "max_adverse_pct": "REAL",
             "suggested_size_pct": "REAL",
             "regime": "TEXT DEFAULT 'unknown'",
+            "mode": "TEXT DEFAULT 'intraday'",
         }
         for col, sql_type in signal_migrations.items():
             if col not in signal_cols:
@@ -302,6 +303,10 @@ def init_db() -> None:
             conn.execute("ALTER TABLE symbols ADD COLUMN market TEXT")
         if "company_name" not in sym_cols:
             conn.execute("ALTER TABLE symbols ADD COLUMN company_name TEXT")
+        # swing_enabled: set by the swing backtest gate (backtest_swing.py --apply);
+        # the hourly swing scan only evaluates symbols that passed it
+        if "swing_enabled" not in sym_cols:
+            conn.execute("ALTER TABLE symbols ADD COLUMN swing_enabled INTEGER DEFAULT 0")
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────
@@ -330,8 +335,8 @@ def log_signal(sig: dict, features: dict | None = None) -> int:
             INSERT INTO signals
                 (symbol, action, strength, price, tp, sl, tp_pct, sl_pct, rr,
                  rsi, trend, quality, ai_confidence, vol_spike, reasons, features,
-                 sent_at, suggested_size_pct, regime)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 sent_at, suggested_size_pct, regime, mode)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             sig["symbol"], sig["action"], sig.get("strength", "RULE"),
             sig.get("price"), sig.get("tp"), sig.get("sl"),
@@ -343,8 +348,24 @@ def log_signal(sig: dict, features: dict | None = None) -> int:
             datetime.utcnow().isoformat(),
             sig.get("suggested_size_pct"),
             sig.get("regime", "unknown"),
+            sig.get("mode", "intraday"),
         ))
         return cur.lastrowid
+
+
+def get_swing_enabled_symbols() -> list[str]:
+    """Symbols that passed the swing backtest gate."""
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT symbol FROM symbols WHERE active = 1 AND swing_enabled = 1 ORDER BY symbol"
+        ).fetchall()
+        return [r["symbol"] for r in rows]
+
+
+def set_swing_enabled(symbol: str, enabled: bool) -> None:
+    with _conn() as conn:
+        conn.execute("UPDATE symbols SET swing_enabled = ? WHERE symbol = ?",
+                     (1 if enabled else 0, symbol))
 
 
 def get_last_signal_action(symbol: str, within_hours: int = 6) -> str | None:

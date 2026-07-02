@@ -44,6 +44,7 @@ from database import (
     get_pending_outcomes_recent,
     get_pending_shadow_signals,
     get_shadow_stats,
+    get_swing_enabled_symbols,
     update_shadow_outcome,
     get_stats,
     get_subscribers_for_symbol,
@@ -77,6 +78,7 @@ from signals import (
     fetch_ohlc,
     get_1h_bias,
     get_signal,
+    get_swing_signal,
     is_crypto,
     is_market_open,
     market_session,
@@ -416,7 +418,13 @@ def _resolve_signal_outcome(sig: dict) -> dict | None:
         sent_at = sent_at.replace(tzinfo=timezone.utc)
 
     now = datetime.now(timezone.utc)
-    interval = "1h" if is_crypto(sig["symbol"]) else "5m"
+    # Swing signals hold for days: check TP/SL touches on 1h candles and only
+    # time out after ~10 trading days (14 calendar). Intraday keeps 24h/5m.
+    is_swing = sig.get("mode") == "swing"
+    if is_swing:
+        interval = "1h"
+    else:
+        interval = "1h" if is_crypto(sig["symbol"]) else "5m"
     pad = timedelta(hours=2) if interval == "1h" else timedelta(minutes=30)
     end = now + timedelta(minutes=5)
 
@@ -504,7 +512,8 @@ def _resolve_signal_outcome(sig: dict) -> dict | None:
                     "metadata": _meta(ts, "sl_hit", touched_sl=True),
                 }
 
-        if age_hours < OUTCOME_CHECK_HOURS:
+        horizon_hours = 14 * 24 if is_swing else OUTCOME_CHECK_HOURS
+        if age_hours < horizon_hours:
             return None
         return {
             "outcome": "neutral",
@@ -1190,6 +1199,61 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
     except Exception as e:
         logger.debug(f"[scan_log] failed to log scan: {e}")
+
+
+# ── Swing scan (daily-bar strategy) ───────────────────────────────────────────
+
+async def swing_scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Hourly scan of the swing (daily-bar) strategy — only for symbols that
+    passed the backtest gate (symbols.swing_enabled, set by backtest_swing.py
+    --apply). Daily bars are immune to yfinance's 15-min delay on European
+    quotes, and the multi-day horizon matches how outcomes actually resolve.
+    """
+    symbols = get_swing_enabled_symbols()
+    if not symbols:
+        return
+
+    n_signals = 0
+    for symbol in symbols:
+        try:
+            # Only fire while the market is open so entry price is actionable
+            if market_session(symbol) != "open":
+                continue
+            # Dedup: one swing signal per symbol per 5 days, and don't stack
+            # on top of a recent intraday signal in the same direction
+            if get_last_signal_action(symbol, within_hours=120) == "BUY":
+                continue
+
+            # Live entry price (falls back to last daily close inside)
+            entry_price = None
+            try:
+                px = fetch_ohlc(symbol, period="1d", interval="5m", retries=1)
+                if px is not None and not px.empty:
+                    entry_price = float(px["Close"].iloc[-1])
+            except Exception:
+                pass
+
+            sig = get_swing_signal(symbol, entry_price=entry_price)
+            if sig is None:
+                continue
+
+            sig["regime"] = get_market_regime()
+            sig["company_name"] = _get_company_name(symbol)
+            log_signal(sig, features={})
+            n_signals += 1
+            await _broadcast_signal(context.bot, sig, session="open")
+
+            if ENABLE_SUBSCRIBER_DM_SIGNALS:
+                open_users = set(get_users_with_open_position(symbol))
+                for uid in get_subscribers_for_symbol(symbol):
+                    if uid not in open_users:
+                        await _send_subscriber_alert(context.bot, uid, sig)
+        except Exception as e:
+            logger.error(f"[swing] error scanning {symbol}: {e}")
+
+    if n_signals:
+        logger.info(f"[swing] scan complete — {n_signals} signal(s) fired")
 
 
 # ── Weekly recap ──────────────────────────────────────────────────────────────
@@ -2335,6 +2399,8 @@ def main() -> None:
     app.job_queue.run_daily(weekly_pooled_retrain,
                             time=datetime.strptime("02:30", "%H:%M").time(),
                             days=(6,))
+    # Swing (daily-bar) strategy scan: hourly, gated by symbols.swing_enabled
+    app.job_queue.run_repeating(swing_scan_and_alert, interval=3600, first=90)
 
     logger.info(f"Bot @{BOT_USERNAME} started — channel: {CHANNEL_ID}")
     app.run_polling()

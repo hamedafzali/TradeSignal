@@ -644,3 +644,105 @@ def combine_signals(rule_sig: dict | None, ml_result: dict,
         return None
 
     return sig
+
+
+# ── Swing strategy (daily bars) ───────────────────────────────────────────────
+# Pullback-in-uptrend on completed daily candles. Rationale: daily bars are
+# immune to the 15-min delay on European yfinance quotes, the multi-day holding
+# horizon matches how outcome resolution actually works, and slower momentum /
+# trend effects are the only ones with real empirical support. Long-only —
+# matches the product (Trade Republic users can't short).
+
+SWING_SL_MULT = 1.5       # stop     = 1.5 x ATR(14) daily
+SWING_TP_MULT = 2.5       # target   = 2.5 x ATR(14) daily  (RR ~1.67)
+SWING_HORIZON_DAYS = 10   # trading days before timeout -> neutral
+
+
+def swing_signal_from_df(symbol: str, df: pd.DataFrame,
+                         entry_price: float | None = None) -> dict | None:
+    """
+    BUY when a dip inside an established uptrend shows a recovery bar.
+      Trend:    close > SMA200  and  EMA20 rising over the last 5 bars
+      Dip:      within the last 5 bars, low touched EMA20 or RSI14 dipped < 45
+      Trigger:  RSI rising, close up on the day, MACD histogram rising
+    Evaluated on COMPLETED daily bars only (last row dropped if today's bar
+    is still forming is the caller's responsibility). entry_price overrides
+    the last close (pass the live price during market hours).
+    """
+    if df is None or len(df) < 210:
+        return None
+
+    close = df["Close"].squeeze().astype(float)
+    low   = df["Low"].squeeze().astype(float)
+
+    sma200 = close.rolling(200).mean()
+    ema20  = close.ewm(span=20, adjust=False).mean()
+    rsi    = _rsi(close)
+    macd_line, sig_line = _macd(close)
+    hist   = macd_line - sig_line
+    atr    = _atr(df)
+
+    c      = float(close.iloc[-1])
+    atr_v  = float(atr.iloc[-1])
+    if pd.isna(atr_v) or atr_v <= 0 or pd.isna(sma200.iloc[-1]):
+        return None
+
+    uptrend = c > float(sma200.iloc[-1]) and float(ema20.iloc[-1]) > float(ema20.iloc[-6])
+    dipped  = bool((low.iloc[-5:] <= ema20.iloc[-5:]).any()
+                   or (rsi.iloc[-5:] < 45).any())
+    rsi_now, rsi_prev = float(rsi.iloc[-1]), float(rsi.iloc[-2])
+    recovery = (rsi_now > rsi_prev
+                and c > float(close.iloc[-2])
+                and float(hist.iloc[-1]) > float(hist.iloc[-2]))
+    not_extended = rsi_now < 65  # don't chase — dip entries only
+
+    if not (uptrend and dipped and recovery and not_extended):
+        return None
+
+    entry = float(entry_price) if entry_price else c
+    sl = round(entry - atr_v * SWING_SL_MULT, 2)
+    tp = round(entry + atr_v * SWING_TP_MULT, 2)
+    tp_pct = round((tp - entry) / entry * 100, 2)
+    sl_pct = round((entry - sl) / entry * 100, 2)
+    rr = round(SWING_TP_MULT / SWING_SL_MULT, 1)
+
+    # Quality: trend distance + dip depth + momentum agreement
+    q = 2
+    if c > float(sma200.iloc[-1]) * 1.05:
+        q += 1                       # comfortably above trend line
+    if (rsi.iloc[-5:] < 40).any():
+        q += 1                       # deep dip = better entry
+    if float(hist.iloc[-1]) > 0:
+        q += 1                       # momentum already positive
+
+    reasons = [
+        f"Uptrend (price above SMA200, EMA20 rising)",
+        f"Pullback recovery (RSI {rsi_now:.0f} turning up)",
+        f"MACD histogram rising",
+        f"~{SWING_HORIZON_DAYS} trading day horizon",
+    ]
+    return {
+        "symbol": symbol, "action": "BUY", "price": entry,
+        "tp": tp, "sl": sl, "tp_pct": tp_pct, "sl_pct": sl_pct, "rr": rr,
+        "rsi": rsi_now, "trend": "up", "atr": atr_v,
+        "vol_spike": False, "reasons": reasons,
+        "strength": "SWING", "ai_confidence": None,
+        "quality": min(q, 5), "stars": _stars(min(q, 5)),
+        "mode": "swing", "suggested_size_pct": _kelly_size(45.0, rr),
+    }
+
+
+def get_swing_signal(symbol: str, entry_price: float | None = None) -> dict | None:
+    """Fetch 2y of daily bars and evaluate the swing rule on completed candles."""
+    df = fetch_ohlc(symbol, period="2y", interval="1d")
+    if df is None or len(df) < 210:
+        return None
+    # Drop today's still-forming bar so the rule sees only completed candles
+    try:
+        last_date = df.index[-1].date()
+        from datetime import datetime as _dt, timezone as _tz
+        if last_date == _dt.now(_tz.utc).date():
+            df = df.iloc[:-1]
+    except Exception:
+        pass
+    return swing_signal_from_df(symbol, df, entry_price=entry_price)
