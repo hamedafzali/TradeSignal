@@ -2804,9 +2804,9 @@ async function refreshAILog() {
       </tr>
       <tr id="ailog-x${i}" class="d-none"><td colspan="6" class="bg-body-tertiary">
         <div class="small text-muted mb-1">SENT:</div>
-        <pre class="small mb-2" style="white-space:pre-wrap;max-height:300px;overflow:auto">${_aiEsc(r.request)}</pre>
+        <pre class="small mb-2" style="white-space:pre-wrap;max-height:300px;overflow:auto">${r.request ? _aiEsc(r.request) : '(not recorded — call predates transcript logging)'}</pre>
         <div class="small text-muted mb-1">RECEIVED:</div>
-        <pre class="small mb-0" style="white-space:pre-wrap;max-height:300px;overflow:auto">${_aiEsc(r.response)}</pre>
+        <pre class="small mb-0" style="white-space:pre-wrap;max-height:300px;overflow:auto">${r.response ? _aiEsc(r.response) : '(not recorded — call predates transcript logging)'}</pre>
       </td></tr>`).join('');
   } catch (e) { console.error('ai logs', e); }
 }
