@@ -245,6 +245,37 @@ def init_db() -> None:
                 final_action    TEXT
             );
 
+            -- LLM post-mortem tags on resolved trades: structured "why did
+            -- this win/lose" labels with news context. Queryable failure
+            -- clusters become filters (see docs/llm-evaluation.md).
+            CREATE TABLE IF NOT EXISTS trade_postmortems (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id    INTEGER NOT NULL,
+                symbol       TEXT NOT NULL,
+                outcome      TEXT NOT NULL,
+                cause        TEXT NOT NULL,
+                market_related   INTEGER DEFAULT 0,
+                earnings_related INTEGER DEFAULT 0,
+                explanation  TEXT,
+                provider     TEXT,
+                model        TEXT,
+                created_at   TEXT NOT NULL
+            );
+
+            -- Every LLM call: the cost/reliability ledger for evaluating
+            -- whether the LLM components earn their keep.
+            CREATE TABLE IF NOT EXISTS llm_calls (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                task          TEXT NOT NULL,
+                provider      TEXT NOT NULL,
+                model         TEXT NOT NULL,
+                input_tokens  INTEGER DEFAULT 0,
+                output_tokens INTEGER DEFAULT 0,
+                ok            INTEGER DEFAULT 0,
+                latency_ms    INTEGER DEFAULT 0,
+                created_at    TEXT NOT NULL
+            );
+
             -- AI-only signals suppressed by shadow mode, tracked so their
             -- hypothetical outcomes can be resolved: the evidence base for
             -- deciding whether (and per-symbol where) to lift shadow mode.
@@ -307,6 +338,12 @@ def init_db() -> None:
         # the hourly swing scan only evaluates symbols that passed it
         if "swing_enabled" not in sym_cols:
             conn.execute("ALTER TABLE symbols ADD COLUMN swing_enabled INTEGER DEFAULT 0")
+        # shadow_signals.source distinguishes what diverted the signal:
+        # 'shadow_ai' (ML shadow mode) vs 'earnings_guard' — each is evaluated
+        # against its own hypothetical outcomes
+        shadow_cols = [r[1] for r in conn.execute("PRAGMA table_info(shadow_signals)").fetchall()]
+        if shadow_cols and "source" not in shadow_cols:
+            conn.execute("ALTER TABLE shadow_signals ADD COLUMN source TEXT DEFAULT 'shadow_ai'")
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────
@@ -419,26 +456,26 @@ def get_pending_outcomes_recent(min_age_hours: float = 1.0) -> list[dict]:
         return [dict(r) for r in rows]
 
 
-def log_shadow_signal(sig: dict) -> None:
-    """Record an AI-only signal suppressed by shadow mode. Dedups against a
-    pending shadow signal for the same symbol+action in the last 6h (mirrors
-    the live dedup), so a persistent AI opinion logs once, not every scan."""
+def log_shadow_signal(sig: dict, source: str = "shadow_ai") -> None:
+    """Record a suppressed signal for hypothetical-outcome tracking. Dedups
+    against a shadow signal for the same symbol+action+source in the last 6h
+    (mirrors the live dedup), so a persistent condition logs once per window."""
     cutoff = (datetime.utcnow() - timedelta(hours=6)).isoformat()
     with _conn() as conn:
         dup = conn.execute(
             """SELECT 1 FROM shadow_signals
-               WHERE symbol = ? AND action = ? AND created_at >= ? LIMIT 1""",
-            (sig["symbol"], sig["action"], cutoff),
+               WHERE symbol = ? AND action = ? AND source = ? AND created_at >= ? LIMIT 1""",
+            (sig["symbol"], sig["action"], source, cutoff),
         ).fetchone()
         if dup:
             return
         conn.execute(
             """INSERT INTO shadow_signals
-               (symbol, action, price, tp, sl, ai_confidence, quality, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               (symbol, action, price, tp, sl, ai_confidence, quality, created_at, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (sig["symbol"], sig["action"], sig["price"], sig.get("tp"),
              sig.get("sl"), sig.get("ai_confidence"), sig.get("quality", 0),
-             datetime.utcnow().isoformat()),
+             datetime.utcnow().isoformat(), source),
         )
 
 
@@ -466,8 +503,9 @@ def update_shadow_outcome(shadow_id: int, outcome: str, outcome_price: float,
         )
 
 
-def get_shadow_stats() -> dict:
-    """Hypothetical performance of shadow-suppressed AI-only signals."""
+def get_shadow_stats(source: str = "shadow_ai") -> dict:
+    """Hypothetical performance of suppressed signals for one source
+    ('shadow_ai' = ML shadow mode, 'earnings_guard' = earnings filter)."""
     week_cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
     with _conn() as conn:
         row = conn.execute("""
@@ -476,11 +514,11 @@ def get_shadow_stats() -> dict:
                    SUM(CASE WHEN outcome='incorrect' THEN 1 ELSE 0 END) AS incorrect,
                    SUM(CASE WHEN outcome='neutral'   THEN 1 ELSE 0 END) AS neutral,
                    SUM(CASE WHEN outcome='pending'   THEN 1 ELSE 0 END) AS pending
-            FROM shadow_signals
-        """).fetchone()
+            FROM shadow_signals WHERE source = ?
+        """, (source,)).fetchone()
         week = conn.execute(
-            "SELECT COUNT(*) FROM shadow_signals WHERE created_at >= ?",
-            (week_cutoff,),
+            "SELECT COUNT(*) FROM shadow_signals WHERE created_at >= ? AND source = ?",
+            (week_cutoff, source),
         ).fetchone()[0]
     resolved = (row["correct"] or 0) + (row["incorrect"] or 0)
     win_rate = round((row["correct"] or 0) / resolved * 100, 1) if resolved else None
@@ -494,6 +532,68 @@ def get_shadow_stats() -> dict:
         "win_rate": win_rate,
         "week": week,
     }
+
+
+def log_llm_call(task: str, provider: str, model: str, input_tokens: int,
+                 output_tokens: int, ok: bool, latency_ms: int) -> None:
+    with _conn() as conn:
+        conn.execute(
+            """INSERT INTO llm_calls
+               (task, provider, model, input_tokens, output_tokens, ok, latency_ms, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (task, provider, model, input_tokens, output_tokens,
+             1 if ok else 0, latency_ms, datetime.utcnow().isoformat()),
+        )
+
+
+def get_llm_usage_stats(days: int = 30) -> dict:
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT task, COUNT(*) n, SUM(ok) ok_n,
+                   SUM(input_tokens) in_tok, SUM(output_tokens) out_tok
+            FROM llm_calls WHERE created_at >= ? GROUP BY task
+        """, (cutoff,)).fetchall()
+    return {r["task"]: {"calls": r["n"], "ok": r["ok_n"] or 0,
+                        "input_tokens": r["in_tok"] or 0,
+                        "output_tokens": r["out_tok"] or 0}
+            for r in rows}
+
+
+def save_postmortem(signal_id: int, symbol: str, outcome: str, cause: str,
+                    market_related: bool, earnings_related: bool,
+                    explanation: str, provider: str, model: str) -> None:
+    with _conn() as conn:
+        dup = conn.execute(
+            "SELECT 1 FROM trade_postmortems WHERE signal_id = ? LIMIT 1",
+            (signal_id,)).fetchone()
+        if dup:
+            return
+        conn.execute(
+            """INSERT INTO trade_postmortems
+               (signal_id, symbol, outcome, cause, market_related,
+                earnings_related, explanation, provider, model, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (signal_id, symbol, outcome, cause, int(market_related),
+             int(earnings_related), explanation, provider, model,
+             datetime.utcnow().isoformat()),
+        )
+
+
+def get_postmortem_stats() -> dict:
+    """Cause distribution split by outcome — the failure-cluster detector.
+    A cause covering >=25% of tagged losses (n>=30) is an actionable filter."""
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT outcome, cause, COUNT(*) n FROM trade_postmortems
+            GROUP BY outcome, cause ORDER BY n DESC
+        """).fetchall()
+        total = conn.execute("SELECT COUNT(*) FROM trade_postmortems").fetchone()[0]
+    losses: dict[str, int] = {}
+    wins: dict[str, int] = {}
+    for r in rows:
+        (losses if r["outcome"] == "incorrect" else wins)[r["cause"]] = r["n"]
+    return {"total": total, "loss_causes": losses, "win_causes": wins}
 
 
 def get_outcome_count(symbol: str | None = None) -> int:

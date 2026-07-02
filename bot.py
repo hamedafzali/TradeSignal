@@ -43,8 +43,11 @@ from database import (
     get_pending_outcomes,
     get_pending_outcomes_recent,
     get_pending_shadow_signals,
+    get_postmortem_stats,
+    get_llm_usage_stats,
     get_shadow_stats,
     get_swing_enabled_symbols,
+    log_shadow_signal,
     update_shadow_outcome,
     get_stats,
     get_subscribers_for_symbol,
@@ -238,6 +241,44 @@ _MAX_SAME_DIRECTION_PER_SCAN = 3
 # Tracks (unix_timestamp, score) per symbol to compute 3h sentiment momentum.
 _sentiment_history: dict[str, list[tuple[float, float]]] = {}
 _SENTIMENT_MOMENTUM_WINDOW = 10800  # 3 hours in seconds
+
+
+# ── Earnings guard ────────────────────────────────────────────────────────────
+# Earnings are binary-event risk no technical indicator can see coming.
+# Suppressed signals are logged as shadow signals (source='earnings_guard') so
+# the guard's value is measured, not assumed: if the hypothetical win rate of
+# suppressed signals turns out HIGHER than live, the guard is hurting and
+# should be removed (see docs/llm-evaluation.md).
+_earnings_cache: dict[str, tuple[float, "object"]] = {}  # symbol -> (fetched_at, next_date|None)
+_EARNINGS_CACHE_TTL = 24 * 3600
+_EARNINGS_WINDOW_DAYS = 3
+
+
+def _near_earnings(symbol: str) -> bool:
+    """True when the symbol reports earnings within the guard window.
+    Missing/unavailable earnings data never blocks a signal."""
+    if is_crypto(symbol):
+        return False
+    now = _time.time()
+    cached = _earnings_cache.get(symbol)
+    if cached and now - cached[0] < _EARNINGS_CACHE_TTL:
+        next_date = cached[1]
+    else:
+        next_date = None
+        try:
+            dates = yf.Ticker(symbol).get_earnings_dates(limit=8)
+            if dates is not None and not dates.empty:
+                today = datetime.now(timezone.utc).date()
+                future = [d.date() for d in dates.index.to_pydatetime()
+                          if d.date() >= today]
+                next_date = min(future) if future else None
+        except Exception as e:
+            logger.debug(f"[earnings_guard] no earnings data for {symbol}: {e}")
+        _earnings_cache[symbol] = (now, next_date)
+    if next_date is None:
+        return False
+    days_until = (next_date - datetime.now(timezone.utc).date()).days
+    return 0 <= days_until <= _EARNINGS_WINDOW_DAYS
 
 
 _AI_MIN_HOLDOUT_AUC = 0.60  # AI-only allowed when holdout buy-AUC demonstrates skill
@@ -598,6 +639,15 @@ async def check_outcomes(context: ContextTypes.DEFAULT_TYPE) -> None:
             if outcome in ("correct", "incorrect"):
                 _update_perf_brake(outcome == "correct")
 
+                # LLM post-mortem tag (no-op without an API key); threaded so
+                # the HTTP call never blocks the outcome loop
+                try:
+                    import asyncio
+                    from postmortem import run_postmortem
+                    await asyncio.to_thread(run_postmortem, sig, outcome, resolved)
+                except Exception as e:
+                    logger.debug(f"[postmortem] skipped: {e}")
+
             entry = sig["price"]
             pct = (current_price - entry) / entry * 100
             sign = "+" if pct >= 0 else ""
@@ -703,6 +753,32 @@ async def ml_health_report(context: ContextTypes.DEFAULT_TYPE) -> None:
         wr_line = (f"`{wk['accuracy']}%` ({wk['correct']}/{wk['resolved']})"
                    if wk["resolved"] > 0 else "no resolved signals")
 
+        # Earnings guard: hypothetical record of what it suppressed. If the
+        # suppressed win rate beats live, the guard is hurting — remove it.
+        eg = get_shadow_stats(source="earnings_guard")
+        if eg["resolved"] > 0:
+            eg_line = (f"`{eg['total']}` suppressed · hypothetical "
+                       f"`{eg['correct']}W/{eg['incorrect']}L` (`{eg['win_rate']}%`)")
+        else:
+            eg_line = f"`{eg['total']}` suppressed · `{eg['pending']}` pending resolution"
+
+        # Post-mortem tags: failure clusters become filters at n>=30
+        pm = get_postmortem_stats()
+        if pm["total"] > 0:
+            top_loss = sorted(pm["loss_causes"].items(), key=lambda x: -x[1])[:3]
+            pm_line = (f"`{pm['total']}` tagged · top loss causes: "
+                       + ", ".join(f"{c} ({n})" for c, n in top_loss))
+        else:
+            pm_line = "none yet (needs LLM API key)"
+
+        usage = get_llm_usage_stats(days=7)
+        if usage:
+            u_line = " · ".join(
+                f"{t}: {v['ok']}/{v['calls']} ok, {(v['input_tokens'] + v['output_tokens']) / 1000:.0f}K tok"
+                for t, v in usage.items())
+        else:
+            u_line = "no LLM calls this week"
+
         msg = (
             "🩺 *Weekly ML Health Report*\n\n"
             f"*Live outcomes:* `{total_outcomes}` total — blend gate opens at "
@@ -711,8 +787,47 @@ async def ml_health_report(context: ContextTypes.DEFAULT_TYPE) -> None:
             f"*Holdout AUC* ({n_skilled}/{len(aucs)} symbols ≥ {_AI_MIN_HOLDOUT_AUC}):\n"
             + "\n".join(auc_top + auc_bottom) + "\n\n"
             f"*Shadow mode:* {shadow_line}\n"
+            f"*Earnings guard:* {eg_line}\n"
+            f"*Post-mortems:* {pm_line}\n"
+            f"*LLM usage (7d):* {u_line}\n"
             f"*7d win rate:* {wr_line}"
         )
+
+        # Optional AI analyst commentary — one reasoning pass over the same
+        # numbers, human-in-the-loop by design (recommendations only; any
+        # strategy change still goes through the backtest gate)
+        try:
+            import asyncio
+            import json as _json
+            from llm import llm_complete
+            analyst_input = _json.dumps({
+                "total_live_outcomes": total_outcomes,
+                "blend_gate": MIN_LIVE_BLEND,
+                "outcome_progress": dict(with_outcomes[:10]),
+                "holdout_auc_top": aucs[:5], "holdout_auc_bottom": aucs[-3:],
+                "shadow_ai": sh, "earnings_guard": eg,
+                "postmortems": pm, "week_stats": wk,
+            }, default=str)
+            analyst = await asyncio.to_thread(
+                llm_complete, "analyst",
+                f"Weekly stats for a rule-based trading signal bot with an "
+                f"ML layer in shadow mode:\n{analyst_input}",
+                "You are a cautious quantitative analyst reviewing one week of "
+                "data from a small trading-signal system. Sample sizes are tiny "
+                "— never draw confident conclusions from n<30. Write max 5 "
+                "short lines, plain text without any markdown: (1) the single "
+                "most important observation, (2) any emerging pattern worth "
+                "watching, (3) at most one concrete experiment to consider, "
+                "which must be backtestable. If the data supports no "
+                "conclusion, say exactly that.",
+                False, 400,
+            )
+            if analyst:
+                safe = str(analyst).replace("*", "").replace("_", "").replace("`", "")[:900]
+                msg += f"\n\n🧠 *Analyst notes:*\n{safe}"
+        except Exception as e:
+            logger.debug(f"[ml_health] analyst section skipped: {e}")
+
         await context.bot.send_message(
             chat_id=ADMIN_CHAT_ID, text=msg, parse_mode="Markdown"
         )
@@ -1144,6 +1259,18 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.info(f"[regime] suppressed {sig['action']} {symbol}: {regime_reason}")
                 continue
 
+            # Earnings guard — binary-event risk; suppressed signals are
+            # shadow-tracked so the guard's value is measured, not assumed
+            if (get_setting("earnings_guard_enabled", "true") == "true"
+                    and _near_earnings(symbol)):
+                logger.info(f"[earnings_guard] suppressed {sig['action']} {symbol}: "
+                            f"earnings within {_EARNINGS_WINDOW_DAYS}d")
+                try:
+                    log_shadow_signal(sig, source="earnings_guard")
+                except Exception:
+                    pass
+                continue
+
             # Tag signal with current 3-state regime before persisting
             sig["regime"] = get_market_regime(spy_df_ctx, vix_df_ctx)
             scan_regime = sig["regime"]
@@ -1236,6 +1363,16 @@ async def swing_scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
 
             sig = get_swing_signal(symbol, entry_price=entry_price)
             if sig is None:
+                continue
+
+            # Same earnings guard as intraday — swing holds span report dates
+            if (get_setting("earnings_guard_enabled", "true") == "true"
+                    and _near_earnings(symbol)):
+                logger.info(f"[earnings_guard] suppressed swing BUY {symbol}")
+                try:
+                    log_shadow_signal(sig, source="earnings_guard")
+                except Exception:
+                    pass
                 continue
 
             sig["regime"] = get_market_regime()

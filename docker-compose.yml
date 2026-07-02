@@ -22,6 +22,9 @@ services:
       - SYMBOLS=${SYMBOLS:-AAPL,TSLA,NVDA,MSFT,BTC-USD,ETH-USD}
       - SCAN_INTERVAL_MINUTES=${SCAN_INTERVAL_MINUTES:-5}
       - OUTCOME_CHECK_HOURS=${OUTCOME_CHECK_HOURS:-24}
+      # LLM layer (optional — features stay dormant without a key)
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
     volumes:
       - .:/app                      # live code mount — git pull takes effect on restart
       - app_data:/app/data
