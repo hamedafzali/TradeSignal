@@ -242,6 +242,7 @@ _HTML = """<!DOCTYPE html>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-activity">Learning</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-performance">Performance</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-timeline">Timeline</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-ailog">AI Log</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-admin">Admin</button></li>
   </ul>
 
@@ -821,6 +822,45 @@ _HTML = """<!DOCTYPE html>
   </div>
 
   <!-- ── ADMIN TAB ─────────────────────────────────────────────────────── -->
+  <div class="tab-pane fade" id="tab-ailog">
+    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+      <h5 class="mb-0">🧠 AI Usage &amp; Transcripts</h5>
+      <div class="d-flex gap-2">
+        <select id="ailog-task-filter" class="form-select form-select-sm" style="width:auto"
+                onchange="refreshAILog()">
+          <option value="">All tasks</option>
+          <option value="postmortem">Post-mortems</option>
+          <option value="analyst">Analyst</option>
+        </select>
+        <button class="btn btn-sm btn-outline-secondary" onclick="refreshAILog()">↻ Refresh</button>
+      </div>
+    </div>
+
+    <div class="row g-3 mb-3" id="ailog-summary"><!-- cards injected --></div>
+
+    <div class="card mb-3">
+      <div class="card-header py-2">📋 Post-mortem causes</div>
+      <div class="card-body py-2" id="ailog-postmortems">
+        <span class="text-muted">loading…</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header py-2">💬 Call transcripts (click a row to expand)</div>
+      <div class="card-body p-0">
+        <div class="table-responsive">
+          <table class="table table-sm table-hover mb-0">
+            <thead><tr>
+              <th>Time (UTC)</th><th>Task</th><th>Model</th>
+              <th class="text-end">Tokens in/out</th><th class="text-end">ms</th><th>OK</th>
+            </tr></thead>
+            <tbody id="ailog-rows"><tr><td colspan="6" class="text-muted">loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="tab-pane fade" id="tab-admin">
 
     <!-- Settings sub-tab nav -->
@@ -2698,6 +2738,78 @@ document.querySelectorAll('[data-bs-target="#tab-signals"]').forEach(el =>
 document.querySelectorAll('[data-bs-target="#tab-timeline"]').forEach(el =>
   el.addEventListener('shown.bs.tab', () => refreshTimeline())
 );
+document.querySelectorAll('[data-bs-target="#tab-ailog"]').forEach(el =>
+  el.addEventListener('shown.bs.tab', () => refreshAILog())
+);
+
+function _aiEsc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+async function refreshAILog() {
+  const task = document.getElementById('ailog-task-filter').value;
+
+  // Summary cards + post-mortem causes
+  try {
+    const s = await (await fetch('/api/llm/summary')).json();
+    const u = s.usage || {};
+    let calls = 0, ok = 0, tokens = 0;
+    for (const t in u) {
+      calls += u[t].calls; ok += u[t].ok;
+      tokens += (u[t].input_tokens || 0) + (u[t].output_tokens || 0);
+    }
+    const okPct = calls ? Math.round(100 * ok / calls) : 100;
+    const eg = s.earnings_guard || {};
+    document.getElementById('ailog-summary').innerHTML = `
+      <div class="col-6 col-md-3"><div class="card text-center"><div class="card-body py-2">
+        <div class="fs-4">${calls}</div><div class="text-muted small">LLM calls (30d)</div></div></div></div>
+      <div class="col-6 col-md-3"><div class="card text-center"><div class="card-body py-2">
+        <div class="fs-4">${okPct}%</div><div class="text-muted small">success rate</div></div></div></div>
+      <div class="col-6 col-md-3"><div class="card text-center"><div class="card-body py-2">
+        <div class="fs-4">${(tokens/1000).toFixed(1)}K</div><div class="text-muted small">tokens (30d)</div></div></div></div>
+      <div class="col-6 col-md-3"><div class="card text-center"><div class="card-body py-2">
+        <div class="fs-4">${eg.total ?? 0}</div><div class="text-muted small">earnings-guard suppressions</div></div></div></div>`;
+
+    const pm = s.postmortems || {};
+    const parts = [];
+    for (const [label, causes] of [['Losses', pm.loss_causes], ['Wins', pm.win_causes]]) {
+      const entries = Object.entries(causes || {}).sort((a, b) => b[1] - a[1]);
+      if (entries.length) {
+        parts.push(`<strong>${label}:</strong> ` + entries.map(([c, n]) =>
+          `<span class="badge text-bg-secondary me-1">${_aiEsc(c)} × ${n}</span>`).join(''));
+      }
+    }
+    document.getElementById('ailog-postmortems').innerHTML =
+      parts.length ? parts.join('<br>')
+                   : '<span class="text-muted">No tagged trades yet — tags appear as outcomes resolve.</span>';
+  } catch (e) { console.error('ai summary', e); }
+
+  // Transcript rows
+  try {
+    const logs = await (await fetch(`/api/llm/logs?limit=100${task ? '&task=' + task : ''}`)).json();
+    const tbody = document.getElementById('ailog-rows');
+    if (!logs.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="text-muted">No LLM calls logged yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = logs.map((r, i) => `
+      <tr style="cursor:pointer" onclick="document.getElementById('ailog-x${i}').classList.toggle('d-none')">
+        <td class="text-nowrap">${_aiEsc((r.created_at || '').slice(0, 19).replace('T', ' '))}</td>
+        <td><span class="badge text-bg-${r.task === 'analyst' ? 'info' : 'primary'}">${_aiEsc(r.task)}</span></td>
+        <td class="small">${_aiEsc(r.model)}</td>
+        <td class="text-end">${r.input_tokens}/${r.output_tokens}</td>
+        <td class="text-end">${r.latency_ms}</td>
+        <td>${r.ok ? '✅' : '❌'}</td>
+      </tr>
+      <tr id="ailog-x${i}" class="d-none"><td colspan="6" class="bg-body-tertiary">
+        <div class="small text-muted mb-1">SENT:</div>
+        <pre class="small mb-2" style="white-space:pre-wrap;max-height:300px;overflow:auto">${_aiEsc(r.request)}</pre>
+        <div class="small text-muted mb-1">RECEIVED:</div>
+        <pre class="small mb-0" style="white-space:pre-wrap;max-height:300px;overflow:auto">${_aiEsc(r.response)}</pre>
+      </td></tr>`).join('');
+  } catch (e) { console.error('ai logs', e); }
+}
 document.querySelectorAll('[data-bs-target="#tab-ml"]').forEach(el =>
   el.addEventListener('shown.bs.tab', () => refreshML())
 );
@@ -2892,6 +3004,16 @@ def api_signals():
 @app.route("/api/ml-stats")
 def api_ml_stats():
     return jsonify(get_ml_accuracy_stats())
+
+
+@app.route("/api/llm/summary")
+def api_llm_summary():
+    from database import get_llm_usage_stats, get_postmortem_stats, get_shadow_stats
+    return jsonify({
+        "usage": get_llm_usage_stats(days=30),
+        "postmortems": get_postmortem_stats(),
+        "earnings_guard": get_shadow_stats(source="earnings_guard"),
+    })
 
 
 @app.route("/api/llm/logs")
