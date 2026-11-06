@@ -87,5 +87,25 @@ class SimulateTests(unittest.TestCase):
         self.assertAlmostEqual(research.score(trades)["avg_r"], 0.8)
 
 
+class AlpacaParsingTests(unittest.TestCase):
+    def test_parse_and_regular_session(self):
+        bars = [  # 2026-03-10 (EDT): 13:25Z = 09:25 ET pre-market, 13:30Z = open
+            {"t": "2026-03-10T13:25:00Z", "o": 1, "h": 1, "l": 1, "c": 1, "v": 5},
+            {"t": "2026-03-10T13:30:00Z", "o": 2, "h": 3, "l": 1.5, "c": 2.5, "v": 10},
+            {"t": "2026-03-10T19:55:00Z", "o": 2, "h": 2, "l": 2, "c": 2, "v": 7},
+            {"t": "2026-03-10T20:00:00Z", "o": 2, "h": 2, "l": 2, "c": 2, "v": 7},
+        ]
+        df = research.regular_session(research.parse_alpaca_bars(bars))
+        self.assertEqual(len(df), 2)
+        self.assertEqual(df["Close"].iloc[0], 2.5)
+
+    def test_hourly_alignment_matches_yfinance(self):
+        idx = pd.date_range("2026-03-10 13:30", "2026-03-10 19:55", freq="5min", tz="UTC")
+        df = pd.DataFrame({"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 1.0}, index=idx)
+        h = research.hourly_from_5m(df)
+        self.assertEqual(len(h), 7)  # 09:30 … 15:30 ET
+        self.assertEqual(h.index[0].tz_convert("America/New_York").strftime("%H:%M"), "09:30")
+
+
 if __name__ == "__main__":
     unittest.main()

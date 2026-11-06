@@ -870,14 +870,17 @@ async def weekly_research(context: ContextTypes.DEFAULT_TYPE) -> None:
     import sys as _sys
     here = os.path.dirname(os.path.abspath(__file__))
     lines = []
-    for tf in ("5m", "1h"):
+    runs = [("5m", ["--tf", "5m"]), ("1h", ["--tf", "1h"])]
+    if os.getenv("ALPACA_API_KEY_ID") and os.getenv("ALPACA_API_SECRET_KEY"):
+        runs.append(("5m-alpaca", ["--tf", "5m", "--source", "alpaca"]))
+    for tf, args in runs:
         try:
             proc = await asyncio.create_subprocess_exec(
-                _sys.executable, "research.py", "--tf", tf, cwd=here,
+                _sys.executable, "research.py", *args, cwd=here,
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
                 env={**os.environ, "PYTHONWARNINGS": "ignore"},
             )
-            _, err = await asyncio.wait_for(proc.communicate(), timeout=3600)
+            _, err = await asyncio.wait_for(proc.communicate(), timeout=3 * 3600)
             if proc.returncode != 0:
                 tail = (err or b"").decode(errors="replace").strip().splitlines()[-1:]
                 logger.error(f"[research] {tf} failed rc={proc.returncode}: {tail}")
@@ -2565,9 +2568,10 @@ def main() -> None:
     app.job_queue.run_repeating(monitor_positions, interval=300, first=60)
     # Refresh news sentiment cache every 30 minutes
     app.job_queue.run_repeating(refresh_sentiment_cache, interval=1800, first=60)
+    # NOTE: python-telegram-bot >= 20 numbers days 0 = Sunday … 6 = Saturday.
     # Weekly recap: every Monday at 9:00 UTC
     app.job_queue.run_daily(weekly_recap, time=datetime.strptime("09:00", "%H:%M").time(),
-                            days=(0,))  # 0 = Monday
+                            days=(1,))  # 1 = Monday
     # Nightly PSI drift detection: 02:00 UTC daily
     app.job_queue.run_daily(drift_detection_check,
                             time=datetime.strptime("02:00", "%H:%M").time())
@@ -2578,16 +2582,16 @@ def main() -> None:
     # Weekly ML health report: Monday 09:05 UTC (right after the weekly recap)
     app.job_queue.run_daily(ml_health_report,
                             time=datetime.strptime("09:05", "%H:%M").time(),
-                            days=(0,))
+                            days=(1,))  # 1 = Monday
     # Pooled cross-symbol 5m model refresh: Sunday 02:30 UTC (markets closed)
     app.job_queue.run_daily(weekly_pooled_retrain,
                             time=datetime.strptime("02:30", "%H:%M").time(),
-                            days=(6,))
+                            days=(0,))  # 0 = Sunday
     # Held-out research backtest: weekend 05:00 UTC (markets closed; well after
     # the 02:30 pooled retrain). Also accumulates 5m history for future runs.
     app.job_queue.run_daily(weekly_research,
                             time=datetime.strptime("05:00", "%H:%M").time(),
-                            days=(6,))
+                            days=(6,))  # 6 = Saturday
     # Swing (daily-bar) strategy scan: hourly, gated by symbols.swing_enabled
     app.job_queue.run_repeating(swing_scan_and_alert, interval=3600, first=90)
 

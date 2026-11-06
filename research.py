@@ -105,6 +105,115 @@ def load_bars(symbol: str, interval: str, period: str,
     return df
 
 
+
+# ── Alpaca (free IEX feed): years of US 5m history ───────────────────────────
+# Free account keys via env ALPACA_API_KEY_ID / ALPACA_API_SECRET_KEY.
+# Free plan: IEX exchange only (prices track the consolidated tape closely;
+# volume is IEX's share, so the relative volume gate is a proxy), 200 req/min,
+# the most recent 15 minutes are not queryable.
+ALPACA_BARS_URL = "https://data.alpaca.markets/v2/stocks/{sym}/bars"
+ALPACA_SINCE = "2016-01-01"
+
+
+def alpaca_keys() -> tuple[str, str] | None:
+    k, s = os.getenv("ALPACA_API_KEY_ID", ""), os.getenv("ALPACA_API_SECRET_KEY", "")
+    return (k, s) if k and s else None
+
+
+def _alpaca_get(url: str, keys: tuple[str, str], retries: int = 5) -> dict:
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(url, headers={
+        "APCA-API-KEY-ID": keys[0], "APCA-API-SECRET-KEY": keys[1],
+        "Accept": "application/json"})
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code == 429 or e.code >= 500:
+                time.sleep(2 ** attempt * 2)
+                continue
+            raise
+        except (urllib.error.URLError, TimeoutError):
+            time.sleep(2 ** attempt)
+    raise RuntimeError(f"Alpaca request failed after {retries} attempts")
+
+
+def parse_alpaca_bars(bars: list[dict]) -> pd.DataFrame:
+    if not bars:
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+    df = pd.DataFrame(bars)
+    df.index = pd.to_datetime(df["t"], utc=True)
+    df = df.rename(columns={"o": "Open", "h": "High", "l": "Low", "c": "Close", "v": "Volume"})
+    return df[["Open", "High", "Low", "Close", "Volume"]].astype(float)
+
+
+def regular_session(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep 09:30–16:00 ET weekday bars (yfinance intraday is regular-hours only)."""
+    if df.empty:
+        return df
+    et = df.index.tz_convert("America/New_York")
+    mins = et.hour * 60 + et.minute
+    keep = (et.weekday < 5) & (mins >= 9 * 60 + 30) & (mins < 16 * 60)
+    return df[keep]
+
+
+def fetch_alpaca(symbol: str, start: pd.Timestamp, end: pd.Timestamp,
+                 keys: tuple[str, str], timeframe: str = "5Min") -> pd.DataFrame:
+    import urllib.parse
+    sym = symbol.replace("-", ".")
+    out, token = [], None
+    while True:
+        q = {"timeframe": timeframe, "start": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+             "end": end.strftime("%Y-%m-%dT%H:%M:%SZ"), "limit": 10000,
+             "feed": "iex", "adjustment": "all", "sort": "asc"}
+        if token:
+            q["page_token"] = token
+        data = _alpaca_get(ALPACA_BARS_URL.format(sym=urllib.parse.quote(sym)) + "?"
+                           + urllib.parse.urlencode(q), keys)
+        out.extend(data.get("bars") or [])
+        token = data.get("next_page_token")
+        time.sleep(0.35)                  # stay under 200 req/min
+        if not token:
+            break
+    return regular_session(parse_alpaca_bars(out))
+
+
+def load_alpaca_5m(symbol: str, download: bool = True,
+                   since: str = ALPACA_SINCE) -> pd.DataFrame | None:
+    """Incrementally cached Alpaca 5m bars (regular session, split-adjusted).
+
+    adjustment=all re-adjusts history after splits/dividends, so a cache built
+    before a corporate action is stale: refetch fully once a month."""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    path = os.path.join(CACHE_DIR, f"{symbol.replace('/', '_')}_5m_alpaca.pkl")
+    cached = pd.read_pickle(path) if os.path.exists(path) else None
+    keys = alpaca_keys()
+    if not download or keys is None:
+        return cached
+    end = pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=20)
+    stale = (cached is None or cached.empty or
+             (time.time() - os.path.getmtime(path)) > 30 * 86400)
+    start = pd.Timestamp(since, tz="UTC") if stale else cached.index[-1] - pd.Timedelta(days=1)
+    fresh = fetch_alpaca(symbol, start, end, keys)
+    if stale or cached is None:
+        df = fresh
+    else:
+        df = pd.concat([cached[cached.index < fresh.index[0]], fresh]) if len(fresh) else cached
+    df = df[~df.index.duplicated(keep="last")].sort_index()
+    if len(df):
+        df.to_pickle(path)
+    return df
+
+
+def hourly_from_5m(df: pd.DataFrame) -> pd.DataFrame:
+    """1h bars aligned like yfinance US hourly bars (09:30, 10:30, …)."""
+    et = df.tz_convert("America/New_York")
+    h = et.resample("1h", offset="30min").agg({"Open": "first", "High": "max", "Low": "min",
+                                                "Close": "last", "Volume": "sum"}).dropna()
+    return h.tz_convert("UTC")
+
 # ── indicators (identical formulas to signals.py) ─────────────────────────────
 
 def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
@@ -289,15 +398,29 @@ def _neighbours(cfg: dict) -> list[dict]:
 
 
 def run(symbols: list[str], tf: str = "5m", download: bool = True,
-        oos_frac: float = 1 / 3, cost_scale: float = 1.0, min_is: int = 30) -> dict:
+        oos_frac: float = 1 / 3, cost_scale: float = 1.0, min_is: int = 30,
+        source: str = "yf") -> dict:
     spec = TF_SPEC[tf]
+    if source == "alpaca":
+        if tf != "5m":
+            raise SystemExit("--source alpaca supports --tf 5m only")
+        symbols = [s for s in symbols if market_of(s) == "us"]
     prepared = []
     for s in symbols:
-        base = load_bars(s, spec["interval"], spec["period"], download)
+        if source == "alpaca":
+            try:
+                base = load_alpaca_5m(s, download)
+            except Exception as e:
+                print(f"  skip {s}: alpaca error {e}")
+                continue
+        else:
+            base = load_bars(s, spec["interval"], spec["period"], download)
         if base is None or len(base) < 300:
             print(f"  skip {s}: no data")
             continue
-        if tf == "5m":
+        if source == "alpaca":
+            ctx = hourly_from_5m(base)
+        elif tf == "5m":
             ctx = load_bars(s, "1h", "730d", download)
         else:
             ctx = base.resample("4h").agg({"Open": "first", "High": "max", "Low": "min",
@@ -306,7 +429,7 @@ def run(symbols: list[str], tf: str = "5m", download: bool = True,
             print(f"  skip {s}: no context data")
             continue
         prepared.append(prepare(s, base, ctx, spec))
-        if download:
+        if download and source == "yf":
             time.sleep(0.3)               # be gentle with yfinance
     if not prepared:
         raise SystemExit("no data")
@@ -373,7 +496,8 @@ def run(symbols: list[str], tf: str = "5m", download: bool = True,
     top_is = sorted(eligible, key=lambda r: r["is"]["avg_r"], reverse=True)[:10]
     return {
         "generated_at": datetime.utcnow().isoformat(timespec="seconds"),
-        "tf": tf, "symbols": len(prepared),
+        "tf": tf if source == "yf" else f"{tf}-{source}", "source": source,
+        "symbols": len(prepared),
         "period": [str(t0)[:16], str(t1)[:16]], "oos_from": str(cut)[:16],
         "cost_pct": {m: round(c * cost_scale, 3) for m, c in DEFAULT_COST_PCT.items()},
         "live": _pub(live), "live_by_market": by_market, "live_by_dir": by_dir,
@@ -443,7 +567,11 @@ def main() -> None:
     ap.add_argument("--cost-scale", type=float, default=1.0,
                     help="multiply default per-market costs (0 = gross)")
     ap.add_argument("--oos", type=float, default=1 / 3, help="held-out fraction")
+    ap.add_argument("--source", choices=["yf", "alpaca"], default="yf",
+                    help="alpaca = years of US 5m bars (needs ALPACA_API_* env)")
     args = ap.parse_args()
+    if args.source == "alpaca" and alpaca_keys() is None and not args.no_download:
+        raise SystemExit("ALPACA_API_KEY_ID / ALPACA_API_SECRET_KEY not set")
 
     if args.symbols:
         symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
@@ -452,13 +580,13 @@ def main() -> None:
         symbols = get_active_symbols()
     print(f"Loading {len(symbols)} symbols ({args.tf})…", file=sys.stderr)
     res = run(symbols, tf=args.tf, download=not args.no_download,
-              oos_frac=args.oos, cost_scale=args.cost_scale)
+              oos_frac=args.oos, cost_scale=args.cost_scale, source=args.source)
     print(report(res))
     try:
         all_res = json.load(open(RESULTS_PATH)) if os.path.exists(RESULTS_PATH) else {}
     except Exception:
         all_res = {}
-    all_res[args.tf] = res
+    all_res[res["tf"]] = res
     with open(RESULTS_PATH, "w") as f:
         json.dump(all_res, f, indent=1, default=str)
 
