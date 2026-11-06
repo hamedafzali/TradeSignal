@@ -1654,6 +1654,10 @@ _SETTING_DEFAULTS = {
     "outcome_notify_admin": "false",           # true / false
     "display_currency": "USD",                 # USD / EUR / GBP / CHF
     "default_market": "us",                    # us / xetra
+    # Round-trip trading cost (% of price) used by the honest R scoreboard
+    "cost_pct_us": "0.05",
+    "cost_pct_eu": "0.10",
+    "cost_pct_crypto": "0.20",
 }
 
 
@@ -2054,6 +2058,116 @@ def get_rolling_performance(days: int = 30, window: int = 20) -> dict:
         "by_strength": by_strength,
         "by_symbol": by_symbol,
         "rolling_20": rolling,
+    }
+
+
+def get_cost_settings() -> dict[str, float]:
+    """Round-trip cost % per market (app_settings cost_pct_<market>)."""
+    from edge_stats import DEFAULT_COST_PCT
+    out = {}
+    for m, d in DEFAULT_COST_PCT.items():
+        try:
+            out[m] = float(get_setting(f"cost_pct_{m}", str(d)))
+        except ValueError:
+            out[m] = d
+    return out
+
+
+def get_expectancy_stats(days: int | None = None,
+                         active_only: bool = False) -> dict:
+    """
+    Honest scoreboard: per-trade R-multiples, gross and net of costs, with a
+    day-clustered 95% CI on the mean.
+
+    R for each resolved signal = signed move / initial risk, where the move is
+    taken from the actual exit price (outcome_price), so timeouts and
+    same-candle ambiguities count with their real P&L instead of 0.
+    Net R subtracts the market's round-trip cost expressed in R.
+    """
+    from edge_stats import market_of, summarize_r
+
+    costs = get_cost_settings()
+    where = ["outcome IN ('correct','incorrect','neutral')", "sl IS NOT NULL",
+             "price > 0"]
+    params: list = []
+    if days:
+        where.append("sent_at >= ?")
+        params.append((datetime.utcnow() - timedelta(days=days)).isoformat())
+    if active_only:
+        where.append("symbol IN (SELECT symbol FROM symbols WHERE active=1)")
+    with _conn() as conn:
+        rows = conn.execute(f"""
+            SELECT symbol, action, price, tp, sl, outcome, outcome_price,
+                   sent_at, mode
+            FROM signals WHERE {' AND '.join(where)}
+            ORDER BY sent_at ASC
+        """, params).fetchall()
+
+    trades = []
+    for r in rows:
+        price, sl, tp = float(r["price"]), float(r["sl"]), r["tp"]
+        sl_pct = abs(price - sl) / price * 100
+        if sl_pct <= 0:
+            continue
+        sign = 1.0 if r["action"] == "BUY" else -1.0
+        exit_px = r["outcome_price"]
+        if exit_px is None:  # legacy rows: fall back to the barrier price
+            exit_px = {"correct": tp, "incorrect": sl}.get(r["outcome"], price)
+        if exit_px is None:
+            continue
+        move_pct = sign * (float(exit_px) - price) / price * 100
+        mkt = market_of(r["symbol"])
+        cost = costs.get(mkt, 0.0)
+        rr = abs(float(tp) - price) / abs(price - sl) if tp else None
+        trades.append({
+            "symbol": r["symbol"], "action": r["action"], "market": mkt,
+            "mode": r["mode"] or "intraday", "day": (r["sent_at"] or "")[:10],
+            "sent_at": r["sent_at"], "outcome": r["outcome"],
+            "sl_pct": sl_pct, "rr": rr, "cost_r": cost / sl_pct,
+            "r_gross": move_pct / sl_pct,
+            "r_net": (move_pct - cost) / sl_pct,
+        })
+
+    def _summ(ts: list[dict]) -> dict:
+        if not ts:
+            return {"n": 0}
+        rrs = [t["rr"] for t in ts if t["rr"]]
+        avg_rr = sum(rrs) / len(rrs) if rrs else None
+        wins = sum(1 for t in ts if t["outcome"] == "correct")
+        d = [t["day"] for t in ts]
+        gross = summarize_r([t["r_gross"] for t in ts], d, wins, avg_rr)
+        net = summarize_r([t["r_net"] for t in ts], d, wins, avg_rr)
+        return {
+            "n": len(ts),
+            "win_rate": gross.get("win_rate"),
+            "breakeven_wr": gross.get("breakeven_wr"),
+            "avg_rr": round(avg_rr, 2) if avg_rr else None,
+            "avg_sl_pct": round(sum(t["sl_pct"] for t in ts) / len(ts), 3),
+            "avg_cost_r": round(sum(t["cost_r"] for t in ts) / len(ts), 3),
+            "gross": gross,
+            "net": net,
+        }
+
+    def _group(key: str) -> dict:
+        groups: dict[str, list] = {}
+        for t in trades:
+            groups.setdefault(t[key], []).append(t)
+        return {k: _summ(v) for k, v in sorted(groups.items())}
+
+    curve, cum_g, cum_n = [], 0.0, 0.0
+    for t in trades:
+        cum_g += t["r_gross"]
+        cum_n += t["r_net"]
+        curve.append({"t": t["sent_at"][:16], "gross": round(cum_g, 2),
+                      "net": round(cum_n, 2)})
+
+    return {
+        "costs_pct": costs,
+        "overall": _summ(trades),
+        "by_action": _group("action"),
+        "by_market": _group("market"),
+        "by_mode": _group("mode"),
+        "curve": curve,
     }
 
 

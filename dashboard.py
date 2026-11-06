@@ -752,6 +752,38 @@ _HTML = """<!DOCTYPE html>
 
   <!-- ── PERFORMANCE TAB ───────────────────────────────────────────────── -->
   <div class="tab-pane fade" id="tab-performance">
+    <!-- Honest scoreboard: R per trade net of costs, with confidence interval -->
+    <div class="card p-3 mb-3">
+      <div class="d-flex align-items-center justify-content-between mb-2 flex-wrap gap-2">
+        <h6 class="mb-0">⚖️ Honest Scoreboard <small class="text-muted">(R per trade, net of costs, 95% CI clustered by day)</small></h6>
+        <div class="d-flex gap-2 align-items-center flex-wrap" style="font-size:.78rem">
+          <select id="exp-days" class="form-select form-select-sm" style="width:auto" onchange="refreshExpectancy()">
+            <option value="">All time</option><option value="90">90 days</option><option value="30">30 days</option>
+          </select>
+          <span class="text-muted">cost % US</span><input id="cost-us" class="form-control form-control-sm" style="width:64px">
+          <span class="text-muted">EU</span><input id="cost-eu" class="form-control form-control-sm" style="width:64px">
+          <span class="text-muted">crypto</span><input id="cost-crypto" class="form-control form-control-sm" style="width:64px">
+          <button class="btn btn-sm btn-outline-secondary" onclick="saveCosts()">Save costs</button>
+        </div>
+      </div>
+      <div id="exp-verdict" class="mb-1"></div>
+      <div id="exp-research" class="mb-2 small"></div>
+      <div class="row g-2 mb-2" id="exp-cards"></div>
+      <div class="row g-3">
+        <div class="col-lg-7"><canvas id="expChart" height="110"></canvas></div>
+        <div class="col-lg-5">
+          <table class="table table-sm mb-0" style="font-size:.8rem">
+            <thead><tr><th>Slice</th><th class="text-end">n</th><th class="text-end">WR / BE</th>
+              <th class="text-end">gross R</th><th class="text-end">net R [95% CI]</th></tr></thead>
+            <tbody id="exp-table"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="text-muted mt-2" style="font-size:.72rem">
+        R = profit ÷ initial risk (entry→stop), from the actual exit price. Cost in R = cost% ÷ stop%:
+        tight stops make costs large. <b>EDGE</b> only when the whole CI is above 0.
+      </div>
+    </div>
     <div class="row g-3 mb-3">
       <!-- Equity Curve -->
       <div class="col-12">
@@ -2840,7 +2872,103 @@ function wrColor(wr) {
   return '#f87171';
 }
 
+let expChartInst = null;
+const _VERDICT_CLS = {'EDGE':'success','UNPROVEN':'warning','NO EDGE':'danger','INSUFFICIENT DATA':'secondary'};
+function _fmtR(x) { return x == null ? '–' : (x >= 0 ? '+' : '') + x.toFixed(3); }
+function _ciTxt(s) { return s.ci_lo == null ? '' : ` [${_fmtR(s.ci_lo)}, ${_fmtR(s.ci_hi)}]`; }
+
+async function saveCosts() {
+  const body = {
+    cost_pct_us: document.getElementById('cost-us').value,
+    cost_pct_eu: document.getElementById('cost-eu').value,
+    cost_pct_crypto: document.getElementById('cost-crypto').value,
+  };
+  await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  refreshExpectancy();
+}
+
+async function refreshExpectancy() {
+  const days = document.getElementById('exp-days').value;
+  let d;
+  try { d = await (await fetch('/api/expectancy' + (days ? '?days=' + days : ''))).json(); }
+  catch (e) { console.error('expectancy', e); return; }
+  try {
+    const rs = await (await fetch('/api/research')).json();
+    const parts = Object.values(rs).map(r => {
+      const b = r.best_cfg || {};
+      return `<span class="badge text-bg-${_VERDICT_CLS[r.verdict] || (r.verdict === 'DATA VALIDATED' ? 'success' : r.verdict === 'TRADE-OFF' ? 'warning' : 'secondary')} me-1">${_aiEsc(r.verdict)}</span>` +
+        `Backtest ${_aiEsc(r.tf)} (${r.symbols} symbols, ${_aiEsc((r.period || [])[0] || '').slice(0, 10)} → ${_aiEsc((r.period || [])[1] || '').slice(0, 10)}): ` +
+        `live rule net ${_fmtR(r.live_all.avg_r)}R (n=${r.live_all.n}); best in-sample config ` +
+        `rsi${b.rsi} sl${b.sl} tp${b.tp} ${_aiEsc(b.filters)} → held-out ${_fmtR(r.best_oos.avg_r)}R; ` +
+        `grid positive OOS ${_aiEsc(r.grid_oos_positive)} <span class="text-muted">(${_aiEsc((r.generated_at || '').slice(0, 10))})</span>`;
+    });
+    document.getElementById('exp-research').innerHTML = parts.length ? parts.join('<br>')
+      : '<span class="text-muted">No research run yet — run <code>python3 research.py</code> in the bot container.</span>';
+  } catch (e) { console.error('research', e); }
+  const c = d.costs_pct || {};
+  for (const m of ['us','eu','crypto']) {
+    const el = document.getElementById('cost-' + m);
+    if (document.activeElement !== el) el.value = c[m] ?? '';
+  }
+  const o = d.overall || {n:0};
+  if (!o.n) {
+    document.getElementById('exp-verdict').innerHTML = '<span class="text-muted">No resolved signals in this window.</span>';
+    document.getElementById('exp-cards').innerHTML = '';
+    document.getElementById('exp-table').innerHTML = '';
+    return;
+  }
+  const v = o.net.verdict;
+  let msg = '';
+  if (v === 'NO EDGE') msg = 'Average trade loses money after costs.';
+  else if (v === 'UNPROVEN') msg = 'Positive on average, but the CI includes 0 — could be luck.' +
+       (o.net.n_needed ? ` ~${o.net.n_needed} trades needed at this rate to confirm.` : '');
+  else if (v === 'EDGE') msg = 'Net expectancy is positive with 95% confidence.';
+  else msg = 'Fewer than 30 trades — no conclusion possible.';
+  document.getElementById('exp-verdict').innerHTML =
+    `<span class="badge text-bg-${_VERDICT_CLS[v] || 'secondary'} me-2">${v}</span><span class="small">${msg}</span>`;
+
+  const card = (val, label) => `<div class="col-6 col-md-2"><div class="card text-center"><div class="card-body py-2">
+      <div class="fs-5">${val}</div><div class="text-muted" style="font-size:.72rem">${label}</div></div></div></div>`;
+  document.getElementById('exp-cards').innerHTML =
+    card(o.n, 'resolved trades') +
+    card(`${o.win_rate ?? '–'}% / ${o.breakeven_wr ?? '–'}%`, 'win rate / breakeven') +
+    card(_fmtR(o.gross.avg_r), 'avg R gross') +
+    card(_fmtR(o.net.avg_r), 'avg R net') +
+    card(`${_fmtR(o.net.ci_lo)} … ${_fmtR(o.net.ci_hi)}`, 'net R 95% CI') +
+    card(`${o.avg_sl_pct}% / ${o.avg_cost_r}R`, 'avg stop / cost per trade');
+
+  const rows = [['All', o]];
+  for (const [k, s] of Object.entries(d.by_action || {})) rows.push([k, s]);
+  for (const [k, s] of Object.entries(d.by_market || {})) rows.push([k.toUpperCase(), s]);
+  for (const [k, s] of Object.entries(d.by_mode || {})) if (Object.keys(d.by_mode).length > 1) rows.push([k, s]);
+  document.getElementById('exp-table').innerHTML = rows.map(([k, s]) => `
+    <tr><td>${_aiEsc(k)}</td><td class="text-end">${s.n}</td>
+      <td class="text-end">${s.win_rate ?? '–'} / ${s.breakeven_wr ?? '–'}</td>
+      <td class="text-end">${_fmtR(s.gross.avg_r)}</td>
+      <td class="text-end"><span class="text-${_VERDICT_CLS[s.net.verdict] || 'secondary'}">${_fmtR(s.net.avg_r)}</span>
+        <span class="text-muted">${_ciTxt(s.net)}</span></td></tr>`).join('');
+
+  const ctx = document.getElementById('expChart').getContext('2d');
+  if (expChartInst) expChartInst.destroy();
+  expChartInst = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: d.curve.map(p => p.t.replace('T', ' ')),
+      datasets: [
+        {label: 'Cumulative R (gross)', data: d.curve.map(p => p.gross), borderColor: '#94a3b8',
+         borderDash: [4, 3], pointRadius: 0, tension: 0.2},
+        {label: 'Cumulative R (net of costs)', data: d.curve.map(p => p.net), borderColor: '#818cf8',
+         pointRadius: 0, tension: 0.2},
+      ],
+    },
+    options: {responsive: true, interaction: {mode: 'index', intersect: false},
+      plugins: {legend: {labels: {boxWidth: 12, font: {size: 11}}}},
+      scales: {x: {ticks: {maxTicksLimit: 8, font: {size: 10}}}, y: {ticks: {font: {size: 10}}}}},
+  });
+}
+
 async function refreshPerformance() {
+  refreshExpectancy();
   const [perf, eq] = await Promise.all([
     fetch('/api/performance?days=90').then(r => r.json()),
     fetch('/api/equity-curve?size=1000').then(r => r.json()),
@@ -3119,6 +3247,7 @@ def api_settings_post():
         "sentiment_suppress_threshold", "news_provider", "finnhub_api_key",
         "outcome_notify_admin", "news_lookback_hours",
         "display_currency",
+        "cost_pct_us", "cost_pct_eu", "cost_pct_crypto",
     }
     for key, value in data.items():
         if key in allowed_keys:
@@ -3187,6 +3316,31 @@ def api_wf_results():
 def api_performance():
     days = int(request.args.get("days", 30))
     return jsonify(get_rolling_performance(days=days))
+
+
+@app.route("/api/expectancy")
+def api_expectancy():
+    from database import get_expectancy_stats
+    days = request.args.get("days", type=int)
+    active = request.args.get("active", "0") == "1"
+    return jsonify(get_expectancy_stats(days=days or None, active_only=active))
+
+
+@app.route("/api/research")
+def api_research():
+    """Latest research.py verdicts (held-out backtest of the live rule)."""
+    import json as _json
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "research_results.json")
+    if not os.path.exists(path):
+        return jsonify({})
+    with open(path) as f:
+        res = _json.load(f)
+    keep = ("generated_at", "tf", "symbols", "period", "oos_from", "verdict", "plateau_share",
+            "grid_oos_positive")
+    return jsonify({tf: {**{k: r.get(k) for k in keep},
+                         "live_all": r["live"]["all"], "live_oos": r["live"]["oos"],
+                         "best_cfg": r["best_is"]["cfg"], "best_oos": r["best_is"]["oos"]}
+                    for tf, r in res.items()})
 
 
 @app.route("/api/equity-curve")
