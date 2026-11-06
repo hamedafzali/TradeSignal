@@ -5,6 +5,7 @@ import pandas as pd
 
 import edge_stats
 import research
+import research_daily as rd
 
 
 class EdgeStatsTests(unittest.TestCase):
@@ -105,6 +106,35 @@ class AlpacaParsingTests(unittest.TestCase):
         h = research.hourly_from_5m(df)
         self.assertEqual(len(h), 7)  # 09:30 … 15:30 ET
         self.assertEqual(h.index[0].tz_convert("America/New_York").strftime("%H:%M"), "09:30")
+
+
+class DailySimTests(unittest.TestCase):
+    def _x(self, o, h, l, c, atr=1.0):
+        idx = pd.date_range("2024-01-01", periods=len(c), freq="B")
+        return pd.DataFrame({"open": o, "high": h, "low": l, "close": c,
+                             "atr": atr}, index=idx, dtype=float)
+
+    def test_entry_next_open_and_both_hit_assumes_stop(self):
+        x = self._x([100, 100, 100, 100], [100, 100, 105, 100],
+                    [100, 100, 97, 100], [100, 100, 100, 100])
+        sig = np.array([True, False, False, False])
+        tr = rd.sim_bracket("AAPL", x, sig, sl_mult=2.0, tp_mult=3.0, hold=3)
+        self.assertEqual(tr[0]["t"], x.index[1])          # entered at t+1 open
+        self.assertEqual(tr[0]["how"], "sl")
+        self.assertAlmostEqual(tr[0]["ret"], -2.0)
+
+    def test_gap_through_stop_fills_at_open(self):
+        x = self._x([100, 100, 95, 95], [100, 100.5, 96, 96],
+                    [100, 99.5, 94, 94], [100, 100, 95, 95])
+        tr = rd.sim_bracket("AAPL", x, np.array([True, False, False, False]), 2.0, 3.0, 3)
+        self.assertEqual(tr[0]["how"], "gap_sl")
+        self.assertAlmostEqual(tr[0]["ret"], -5.0)
+
+    def test_excess_subtracts_holding_drift(self):
+        t = {"symbol": "AAPL", "t": pd.Timestamp("2024-01-02"), "ret": 1.05, "days": 5}
+        s = rd.score_trades([t] * 40, {"AAPL": 0.2})       # 0.05% cost, 5d x 0.2%
+        self.assertAlmostEqual(s["net"], 1.0)
+        self.assertAlmostEqual(s["excess"], 0.0)
 
 
 if __name__ == "__main__":
