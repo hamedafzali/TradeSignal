@@ -858,6 +858,53 @@ async def weekly_pooled_retrain(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error(f"[pooled] weekly retrain failed: {e}")
 
 
+async def weekly_research(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Weekly held-out backtest of the live rule (research.py), weekend.
+
+    Runs as a subprocess so its memory is released afterwards. Each 5m run
+    also grows data/research_cache (yfinance only serves 60 days of 5m bars),
+    so the 5m sample gets longer every week. Result lands in
+    data/research_results.json, shown on the dashboard scoreboard."""
+    import asyncio
+    import json as _json
+    import sys as _sys
+    here = os.path.dirname(os.path.abspath(__file__))
+    lines = []
+    for tf in ("5m", "1h"):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                _sys.executable, "research.py", "--tf", tf, cwd=here,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+                env={**os.environ, "PYTHONWARNINGS": "ignore"},
+            )
+            _, err = await asyncio.wait_for(proc.communicate(), timeout=3600)
+            if proc.returncode != 0:
+                tail = (err or b"").decode(errors="replace").strip().splitlines()[-1:]
+                logger.error(f"[research] {tf} failed rc={proc.returncode}: {tail}")
+                lines.append(f"{tf}: ❌ failed")
+                continue
+            with open(os.path.join(here, "data", "research_results.json")) as f:
+                r = _json.load(f)[tf]
+            live = r["live"]["all"]
+            lines.append(
+                f"{tf}: *{r['verdict']}* · live rule net `{live['avg_r']:+.3f}R` "
+                f"(n={live['n']}) · grid positive OOS `{r['grid_oos_positive']}`"
+            )
+            logger.info(f"[research] {tf} verdict={r['verdict']} live_net={live['avg_r']}")
+        except Exception as e:
+            logger.error(f"[research] {tf} error: {e}")
+            lines.append(f"{tf}: ❌ {e}")
+    if lines and ADMIN_CHAT_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text="🔬 *Weekly research (held-out, net of costs)*\n" + "\n".join(lines),
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+
+
 async def nightly_db_backup(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Daily online backup of trading.db (the labeled outcome data is the one
     thing this system can't regenerate). Keeps the newest 7 in data/backups/."""
@@ -2535,6 +2582,11 @@ def main() -> None:
     # Pooled cross-symbol 5m model refresh: Sunday 02:30 UTC (markets closed)
     app.job_queue.run_daily(weekly_pooled_retrain,
                             time=datetime.strptime("02:30", "%H:%M").time(),
+                            days=(6,))
+    # Held-out research backtest: weekend 05:00 UTC (markets closed; well after
+    # the 02:30 pooled retrain). Also accumulates 5m history for future runs.
+    app.job_queue.run_daily(weekly_research,
+                            time=datetime.strptime("05:00", "%H:%M").time(),
                             days=(6,))
     # Swing (daily-bar) strategy scan: hourly, gated by symbols.swing_enabled
     app.job_queue.run_repeating(swing_scan_and_alert, interval=3600, first=90)
