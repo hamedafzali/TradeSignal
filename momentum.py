@@ -215,6 +215,28 @@ def _neighbours(cfg: dict, grid: dict | None = None) -> list[dict]:
     return out
 
 
+def verdict_published(full: dict, oos: dict, plateau: float, dsr: float | None,
+                      survivorship: bool) -> str:
+    """Verdict on a rule taken unchanged from the literature (gate revised
+    2026-11-07). Such a rule was never fitted to our data, so every month of
+    history is out of sample for it; judging it only on the last third threw
+    away two thirds of the evidence. To compensate it must ALSO:
+      - still have positive alpha in the recent third (no post-publication decay),
+      - hold up in neighbouring parameter settings (plateau, full history),
+      - survive the deflated Sharpe for every variant ever tried,
+      - not rest on a survivorship-biased universe (today's index members
+        back-filled into the past) — such a backtest cannot validate anything.
+    """
+    if full.get("n", 0) < 60:
+        return "INSUFFICIENT DATA"
+    if full["alpha_mo"] <= 0 or (oos.get("n", 0) >= 24 and oos["alpha_mo"] <= 0):
+        return "NO EDGE"
+    if (full["alpha_lo"] > 0 and oos.get("alpha_mo", 0) > 0 and plateau >= 0.6
+            and (dsr or 0) >= 0.95 and not survivorship):
+        return "DATA VALIDATED"
+    return "TRADE-OFF"
+
+
 def verdict(oos_ab: dict, plateau: float, dsr: float | None) -> str:
     if oos_ab.get("n", 0) < 36:
         return "INSUFFICIENT DATA"
@@ -241,10 +263,12 @@ def load_closes(symbols: list[str], download: bool) -> pd.DataFrame:
 
 def study(daily_close: pd.DataFrame, region: str, weight_fn=None, grid: dict | None = None,
           default: dict | None = None, prior_trials: int | None = None,
-          bench_cols: list[str] | None = None) -> dict:
-    """In-sample = first 2/3 of the months, out-of-sample = last 1/3. The
-    pre-registered `default` config is what the verdict is about; the best
-    in-sample config is reported for information only."""
+          bench_cols: list[str] | None = None, survivorship: bool = False) -> dict:
+    """The verdict is about the pre-registered `default` (a published rule),
+    judged on the full history by `verdict_published`. In-sample = first 2/3,
+    out-of-sample = last 1/3 is kept for the decay check and for the best
+    in-sample config, which is fitted here and so judged on OOS only
+    (information only — it is never what gets traded)."""
     grid = grid or GRID
     default = default or DEFAULT_CFG
     prior_trials = PRIOR_TRIALS if prior_trials is None else prior_trials
@@ -258,13 +282,16 @@ def study(daily_close: pd.DataFrame, region: str, weight_fn=None, grid: dict | N
     for k, r in runs.items():
         a, b = r[r.index < cut], r[r.index >= cut]
         res[k] = {"is": alpha_beta(a["port"], a["bench"]),
-                  "oos": alpha_beta(b["port"], b["bench"])}
+                  "oos": alpha_beta(b["port"], b["bench"]),
+                  "full": alpha_beta(r["port"], r["bench"])}
 
     def pick(cfg):
         r = runs[_key(cfg)]
         b = r[r.index >= cut]
         return {"cfg": cfg, "is": res[_key(cfg)]["is"], "oos": res[_key(cfg)]["oos"],
+                "full": res[_key(cfg)]["full"],
                 "oos_perf": perf(b["port"]), "oos_bench": perf(b["bench"]),
+                "full_perf": perf(r["port"]), "full_bench": perf(r["bench"]),
                 "oos_exposure": round(float(b["exposure"].mean()), 2),
                 "turnover_yr": round(float(r["turnover"].mean() * 12), 2)}
 
@@ -273,26 +300,38 @@ def study(daily_close: pd.DataFrame, region: str, weight_fn=None, grid: dict | N
     for label, cfg in (("default", default), ("best_is", best_cfg)):
         p = pick(cfg)
         nb = _neighbours(cfg, grid)
-        plateau = (sum(1 for c in nb if res[_key(c)]["oos"].get("alpha_mo", -1) > 0) / len(nb)
+        # published default: whole history; fitted best_is: held-out third only
+        span = "full" if label == "default" else "oos"
+        lo = first if span == "full" else cut
+        plateau = (sum(1 for c in nb if res[_key(c)][span].get("alpha_mo", -1) > 0) / len(nb)
                    if nb else 0.0)
-        # Deflated Sharpe on the OOS months, penalised for every variant tried
+        # Deflated Sharpe, penalised for every variant tried
         b = runs[_key(cfg)]
-        b = b[b.index >= cut]["port"]
-        srs = [float(r[r.index >= cut]["port"].mean() / r[r.index >= cut]["port"].std())
-               for r in runs.values() if len(r[r.index >= cut]) > 12]
+        b = b[b.index >= lo]["port"]
+        srs = [float(r[r.index >= lo]["port"].mean() / r[r.index >= lo]["port"].std())
+               for r in runs.values() if len(r[r.index >= lo]) > 12]
         dsr = deflated_sharpe(b.to_numpy(), srs, n_trials=len(cfgs) + prior_trials)
-        p.update({"plateau": round(plateau, 2), "dsr": None if dsr is None else round(dsr, 3)})
-        p["verdict"] = verdict(p["oos"], plateau, dsr)
+        p.update({"plateau": round(plateau, 2), "dsr": None if dsr is None else round(dsr, 3),
+                  "judged_on": span})
+        p["verdict"] = (verdict_published(p["full"], p["oos"], plateau, dsr, survivorship)
+                        if label == "default" else verdict(p["oos"], plateau, dsr))
         out[label] = p
     pos = sum(1 for v in res.values() if v["oos"].get("alpha_mo", -1) > 0)
     return {"region": region, "symbols": daily_close.shape[1],
             "period": [str(first.date()), str(last.date())], "oos_from": str(cut.date()),
+            "survivorship_bias": survivorship,
             "grid_oos_positive": f"{pos}/{len(cfgs)}", **out}
 
 
 def _fmt(p: dict) -> str:
     o, pf, bm = p["oos"], p["oos_perf"], p["oos_bench"]
-    return "\n".join([
+    full = []
+    if p.get("judged_on") == "full" and p["full"].get("alpha_mo") is not None:
+        f, fp, fb = p["full"], p["full_perf"], p["full_bench"]
+        full = [f"    alpha FULL {f['alpha_mo']:+.2f}%/mo [{f['alpha_lo']:+.2f} … {f['alpha_hi']:+.2f}] "
+                f"t={f['alpha_t']} beta={f['beta']} n={f['n']} · CAGR {fp['cagr']}% vs {fb['cagr']}% "
+                f"maxDD {fp['max_dd']}% vs {fb['max_dd']}%"]
+    return "\n".join(full + [
         f"    alpha OOS {o['alpha_mo']:+.2f}%/mo [{o['alpha_lo']:+.2f} … {o['alpha_hi']:+.2f}] "
         f"t={o['alpha_t']} beta={o['beta']} · IS alpha {p['is'].get('alpha_mo', 0):+.2f}%/mo",
         f"    OOS strategy CAGR {pf['cagr']}% vol {pf['vol']}% Sharpe {pf['sharpe']} "
@@ -307,7 +346,8 @@ def report(r: dict) -> str:
     return "\n".join([
         f"=== Momentum [{r['region']}] {r['symbols']} symbols, {r['period'][0]} → "
         f"{r['period'][1]}, OOS from {r['oos_from']} · grid OOS-alpha>0 {r['grid_oos_positive']}",
-        f"  textbook default {_key(r['default']['cfg'])}: {r['default']['verdict']}",
+        f"  textbook default {_key(r['default']['cfg'])}: {r['default']['verdict']}"
+        + ("  (survivorship-biased universe: cannot validate)" if r.get("survivorship_bias") else ""),
         _fmt(r["default"]),
         f"  best on IS {_key(r['best_is']['cfg'])}: {r['best_is']['verdict']}",
         _fmt(r["best_is"])])
@@ -381,7 +421,7 @@ def main() -> None:
     for reg in regions:
         print(f"Loading {reg} universe…", file=sys.stderr)
         closes = load_closes(UNIVERSES[reg], download=not args.no_download)
-        r = study(closes, reg)
+        r = study(closes, reg, survivorship=True)   # today's index members
         r["generated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
         results[reg] = r
         print(report(r))

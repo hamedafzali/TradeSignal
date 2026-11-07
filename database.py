@@ -77,12 +77,15 @@ STRATEGY_SEED = {
                "Frazzini & Pedersen); must pass the validation gate before paper"),
     "trend_alloc": ("research", "Literature-backed multi-asset trend following (Faber GTAA, "
                     "Hurst-Ooi-Pedersen); must pass the validation gate before paper"),
+    "etf_mom": ("research", "Survivorship-free momentum on sector + country ETFs "
+                "(Moskowitz-Grinblatt, Asness-Moskowitz-Pedersen); must pass the gate"),
 }
 # Monthly portfolio strategies: module (CLI with --paper --region) and regions
 PORTFOLIO_STRATEGIES = {
     "momentum": ("momentum.py", ["us", "eu"]),
     "lowvol": ("lowvol.py", ["us", "eu"]),
     "trend_alloc": ("trend_alloc.py", ["global"]),
+    "etf_mom": ("etf_mom.py", ["global"]),
 }
 
 

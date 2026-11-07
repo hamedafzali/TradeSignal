@@ -18,6 +18,14 @@ are applied mechanically every week after the research runs:
                         - live drawdown > 1.5x the worst out-of-sample
                           drawdown seen in research.
 
+Revision 2026-11-07 (after the first results, so stated openly): a rule
+taken unchanged from the literature is judged on its FULL history, since it
+was never fitted to our data (momentum.verdict_published). In exchange it must
+also show positive alpha in the recent third (no decay), and a backtest on a
+survivorship-biased universe (today's index members) can no longer validate
+at all. Monthly portfolio paper records are beta-adjusted with the research
+beta, so they measure the same alpha the research verdict is about.
+
 Paper strategies keep generating and logging signals (published=0) so the
 record keeps growing — nothing is thrown away, nothing reaches users.
 Rules are never edited in the middle of a drawdown.
@@ -37,13 +45,16 @@ DD_MULT = 1.5
 PAPER_DAYS_FOR_LIVE = 90
 # minimum record size: (to call it confidently negative, to call it eligible)
 MIN_N = {"intraday": (30, 30), "swing": (30, 30),
-         "momentum": (6, 3), "lowvol": (6, 3), "trend_alloc": (6, 3)}
+         "momentum": (6, 3), "lowvol": (6, 3), "trend_alloc": (6, 3),
+         "etf_mom": (6, 3)}
 UNIT = {"intraday": "R", "swing": "R",
-        "momentum": "%/mo", "lowvol": "%/mo", "trend_alloc": "%/mo"}
+        "momentum": "%/mo", "lowvol": "%/mo", "trend_alloc": "%/mo",
+        "etf_mom": "%/mo"}
 # Monthly portfolio strategies -> their research results file (keyed by region)
 PORTFOLIO_RESULTS = {"momentum": "research_momentum.json",
                      "lowvol": "research_lowvol.json",
-                     "trend_alloc": "research_trend_alloc.json"}
+                     "trend_alloc": "research_trend_alloc.json",
+                     "etf_mom": "research_etf_mom.json"}
 
 
 def _load(name: str) -> dict | None:
@@ -95,12 +106,23 @@ def research_evidence(name: str) -> dict | None:
             verdict = "NO EDGE"
         else:
             verdict = "TRADE-OFF"
-        dds = [abs(regs[k].get("oos_perf", {}).get("max_dd") or 0) for k in (passing or regs)]
-        detail = "; ".join(
-            f"{k}: {v.get('verdict')} alpha {v['oos'].get('alpha_mo')}%/mo "
-            f"[{v['oos'].get('alpha_lo')} … {v['oos'].get('alpha_hi')}] DSR {v.get('dsr')}"
-            for k, v in sorted(regs.items()) if v.get("oos"))
+        # drawdown budget from the longest history judged (includes 2008/2020)
+        dds = [abs((regs[k].get("full_perf") or regs[k].get("oos_perf") or {}).get("max_dd") or 0)
+               for k in (passing or regs)]
+
+        def _line(k, v):
+            a = v.get("full") if v.get("judged_on") == "full" else v.get("oos")
+            span = "full" if v.get("judged_on") == "full" else "OOS"
+            bias = " survivorship-biased" if d[k].get("survivorship_bias") else ""
+            return (f"{k}: {v.get('verdict')}{bias} alpha {span} {a.get('alpha_mo')}%/mo "
+                    f"[{a.get('alpha_lo')} … {a.get('alpha_hi')}] recent {v['oos'].get('alpha_mo')} "
+                    f"DSR {v.get('dsr')}")
+        detail = "; ".join(_line(k, v) for k, v in sorted(regs.items()) if v.get("oos"))
+        # beta the research measured, so the paper record is judged the same way
+        betas = {k: (v.get("full") if v.get("judged_on") == "full" else v.get("oos") or {}).get("beta")
+                 for k, v in regs.items()}
         return {"verdict": verdict, "regions": passing,
+                "betas": {k: b for k, b in betas.items() if b is not None},
                 "max_dd": max(dds) if dds and max(dds) > 0 else None, "detail": detail,
                 "generated_at": max(str(d[k].get("generated_at", "")) for k in regs)}
     return None
@@ -151,16 +173,20 @@ def portfolio_paper_returns(rebalances: list[dict]) -> list[dict]:
 momentum_paper_returns = portfolio_paper_returns   # backwards-compatible name
 
 
-def portfolio_record(name: str, since: str | None) -> dict:
+def portfolio_record(name: str, since: str | None, betas: dict | None = None) -> dict:
     """Paper/live record of a monthly portfolio strategy, pooled over regions,
-    in % per month (excess vs its equal-weight universe)."""
+    in % per month. 'Excess' is beta-adjusted (port - beta * bench, beta from
+    the research) — the same alpha the research verdict is about; without it a
+    defensive strategy would look like a loser in every rising month."""
     from database import get_paper_rebalances
     months = []
     regions = {}
     for rb in get_paper_rebalances(name):
         regions.setdefault(rb["region"], []).append(rb)
     for reg, rbs in regions.items():
-        months += portfolio_paper_returns(rbs)
+        beta = (betas or {}).get(reg, 1.0)
+        months += [{**m, "excess": m["port"] - beta * m["bench"]}
+                   for m in portfolio_paper_returns(rbs)]
     if since:
         months = [m for m in months if m["t"] >= since[:10]]
     months.sort(key=lambda m: m["t"])
@@ -245,7 +271,7 @@ def evaluate_all(apply: bool = True) -> list[dict]:
         research = research_evidence(name)
         since = s.get("updated_at")
         if name in PORTFOLIO_RESULTS:
-            record = portfolio_record(name, since)
+            record = portfolio_record(name, since, (research or {}).get("betas"))
         else:
             record = signal_record(name, since, published=(status == "live"))
         d = decide(name, status, research, record, _days_since(since))

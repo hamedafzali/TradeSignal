@@ -92,7 +92,8 @@ def main() -> None:
         print(f"Loading {reg} universe…", file=sys.stderr)
         closes = eng.load_closes(UNIVERSES[reg], download=not args.no_download)
         r = eng.study(closes, reg, weight_fn=target_weights, grid=GRID,
-                      default=DEFAULT_CFG, prior_trials=PRIOR_TRIALS)
+                      default=DEFAULT_CFG, prior_trials=PRIOR_TRIALS,
+                      survivorship=True)   # today's index members
         r["strategy"] = STRATEGY
         r["generated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
         results[reg] = r

@@ -909,6 +909,7 @@ async def weekly_research(context: ContextTypes.DEFAULT_TYPE) -> None:
         ("momentum", "momentum.py", ["--region", "all"]),
         ("lowvol", "lowvol.py", ["--region", "all"]),
         ("trend_alloc", "trend_alloc.py", []),
+        ("etf_mom", "etf_mom.py", []),
     ):
         try:
             proc = await asyncio.create_subprocess_exec(

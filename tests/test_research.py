@@ -213,6 +213,20 @@ class GateTests(unittest.TestCase):
         self.assertAlmostEqual(m["bench"], -0.10)
         self.assertGreater(m["excess"], 0.09)
 
+    def test_portfolio_record_is_beta_adjusted(self):
+        # defensive portfolio (beta 0.4) that earned exactly 0.4 x a +5% month:
+        # zero alpha, not a 3% shortfall
+        from unittest import mock
+        rbs = [{"region": "global", "asof": "2026-01-31", "weights": {"A": 0.4},
+                "prices": {"A": 100}},
+               {"region": "global", "asof": "2026-02-28", "weights": {"A": 0.4},
+                "prices": {"A": 105}}]
+        with mock.patch("database.get_paper_rebalances", return_value=rbs):
+            raw = gate.portfolio_record("x", None)
+            adj = gate.portfolio_record("x", None, {"global": 0.4})
+        self.assertAlmostEqual(raw["avg"], 100 * (0.02 - 0.4 * 0.05 / 200 - 0.05), places=3)
+        self.assertAlmostEqual(adj["avg"], 100 * (-0.4 * 0.05 / 200), places=3)
+
 
 class PortfolioStrategyTests(unittest.TestCase):
     def test_lowvol_picks_calmest(self):
@@ -238,6 +252,21 @@ class PortfolioStrategyTests(unittest.TestCase):
         i = pd.bdate_range("2026-09-01", "2026-10-30")      # Oct 31 is a Saturday
         df = pd.DataFrame({"a": 1.0}, index=i)
         self.assertEqual(len(momentum.drop_incomplete_month(df)), len(df))
+
+    def test_verdict_published(self):
+        from momentum import verdict_published as v
+        full = {"n": 240, "alpha_mo": 0.23, "alpha_lo": 0.05}
+        oos = {"n": 80, "alpha_mo": 0.26}
+        self.assertEqual(v(full, oos, 1.0, 0.99, False), "DATA VALIDATED")
+        # survivorship-biased universe can never validate
+        self.assertEqual(v(full, oos, 1.0, 0.99, True), "TRADE-OFF")
+        # edge that died after publication: recent third negative
+        self.assertEqual(v(full, {"n": 80, "alpha_mo": -0.1}, 1.0, 0.99, False), "NO EDGE")
+        # CI spans zero / fragile / luck
+        self.assertEqual(v({**full, "alpha_lo": -0.01}, oos, 1.0, 0.99, False), "TRADE-OFF")
+        self.assertEqual(v(full, oos, 0.5, 0.99, False), "TRADE-OFF")
+        self.assertEqual(v(full, oos, 1.0, 0.90, False), "TRADE-OFF")
+        self.assertEqual(v({**full, "n": 40}, oos, 1.0, 0.99, False), "INSUFFICIENT DATA")
 
     def test_trend_alloc_moves_downtrends_to_cash(self):
         import trend_alloc as ta
@@ -273,6 +302,7 @@ class PublishedFilterTests(unittest.TestCase):
         self.assertEqual(db.get_strategy_status("momentum"), "research")
         self.assertEqual(db.get_strategy_status("lowvol"), "research")
         self.assertEqual(db.get_strategy_status("trend_alloc"), "research")
+        self.assertEqual(db.get_strategy_status("etf_mom"), "research")
         self.assertEqual(db.get_strategy_status("unknown"), "paper")
         self.assertFalse(db.is_strategy_live("intraday"))
         base = {"symbol": "AAPL", "action": "BUY", "price": 100, "tp": 102, "sl": 99}
