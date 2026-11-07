@@ -204,6 +204,46 @@ class GateTests(unittest.TestCase):
         self.assertAlmostEqual(m[0]["port"], 0.05 - 0.5 * 0.05 / 200)
         self.assertAlmostEqual(m[0]["bench"], 0.05)
 
+    def test_paper_returns_use_bench_symbols(self):
+        rbs = [{"asof": "2026-01-31", "weights": {"SHY": 1.0},
+                "prices": {"SPY": 100, "SHY": 80}, "info": {"bench_symbols": ["SPY"]}},
+               {"asof": "2026-02-28", "weights": {"SHY": 1.0},
+                "prices": {"SPY": 90, "SHY": 80}, "info": {"bench_symbols": ["SPY"]}}]
+        m = gate.portfolio_paper_returns(rbs)[0]
+        self.assertAlmostEqual(m["bench"], -0.10)
+        self.assertGreater(m["excess"], 0.09)
+
+
+class PortfolioStrategyTests(unittest.TestCase):
+    def test_lowvol_picks_calmest(self):
+        import lowvol
+        rng = np.random.default_rng(3)
+        idx = pd.bdate_range("2020-01-01", periods=300)
+        vols = np.linspace(0.005, 0.03, 10)
+        ret = pd.DataFrame(rng.normal(0, 1, (300, 10)) * vols,
+                           index=idx, columns=[f"S{i}" for i in range(10)])
+        close = (1 + ret).cumprod()
+        mc = close.resample("ME").last()
+        m = mc.index[-1]
+        w, info = lowvol.target_weights(mc, ret, pd.Series(dtype=float), m,
+                                        {"win": 252, "k": 3, "trend": False})
+        self.assertEqual(sorted(info["picks"]), ["S0", "S1", "S2"])
+        self.assertAlmostEqual(w.sum(), 1.0)
+
+    def test_trend_alloc_moves_downtrends_to_cash(self):
+        import trend_alloc as ta
+        idx = pd.date_range("2020-01-31", periods=24, freq="ME")
+        up = np.linspace(100, 150, 24)
+        down = np.linspace(150, 100, 24)
+        mc = pd.DataFrame({"SPY": up, "EFA": down, "IEF": up, "VNQ": down,
+                           "DBC": up, "SHY": np.full(24, 80.0)}, index=idx)
+        w, info = ta.target_weights(mc, mc.pct_change(), pd.Series(dtype=float),
+                                    idx[-1], {"sma": 10, "top": None})
+        self.assertAlmostEqual(w["SPY"], 0.2)
+        self.assertAlmostEqual(w["EFA"], 0.0)
+        self.assertAlmostEqual(w["SHY"], 0.4)
+        self.assertAlmostEqual(w.sum(), 1.0)
+
 
 class PublishedFilterTests(unittest.TestCase):
     def setUp(self):
@@ -222,6 +262,8 @@ class PublishedFilterTests(unittest.TestCase):
         self.assertEqual(db.get_strategy_status("intraday"), "paper")
         self.assertEqual(db.get_strategy_status("swing"), "paper")
         self.assertEqual(db.get_strategy_status("momentum"), "research")
+        self.assertEqual(db.get_strategy_status("lowvol"), "research")
+        self.assertEqual(db.get_strategy_status("trend_alloc"), "research")
         self.assertEqual(db.get_strategy_status("unknown"), "paper")
         self.assertFalse(db.is_strategy_live("intraday"))
         base = {"symbol": "AAPL", "action": "BUY", "price": 100, "tp": 102, "sl": 99}

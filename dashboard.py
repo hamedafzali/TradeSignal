@@ -752,6 +752,15 @@ _HTML = """<!DOCTYPE html>
 
   <!-- ── PERFORMANCE TAB ───────────────────────────────────────────────── -->
   <div class="tab-pane fade" id="tab-performance">
+    <!-- Strategy registry: only 'live' strategies reach users -->
+    <div class="card p-3 mb-3">
+      <h6 class="mb-2">🧭 Strategy Registry <small class="text-muted">(only <b>live</b> reaches users · weekly held-out research + pre-registered gate)</small></h6>
+      <table class="table table-sm mb-1" style="font-size:.8rem">
+        <thead><tr><th>Strategy</th><th>Status</th><th>Research</th><th>Own record</th><th>Gate</th></tr></thead>
+        <tbody id="strat-table"><tr><td colspan="5" class="text-muted">Loading…</td></tr></tbody>
+      </table>
+      <div id="strat-events" class="text-muted" style="font-size:.72rem"></div>
+    </div>
     <!-- Honest scoreboard: R per trade net of costs, with confidence interval -->
     <div class="card p-3 mb-3">
       <div class="d-flex align-items-center justify-content-between mb-2 flex-wrap gap-2">
@@ -2967,7 +2976,31 @@ async function refreshExpectancy() {
   });
 }
 
+async function refreshStrategies() {
+  let d;
+  try { d = await (await fetch('/api/strategies')).json(); }
+  catch (e) { console.error('strategies', e); return; }
+  const stCls = {live: 'success', paper: 'info', research: 'secondary', retired: 'dark'};
+  const vCls = v => v === 'DATA VALIDATED' ? 'success' : v === 'TRADE-OFF' ? 'warning' : v === 'NO EDGE' ? 'danger' : 'secondary';
+  const rows = (d.strategies || []).map(s => {
+    const ev = s.evidence || {}, r = ev.research || {}, rec = ev.record || {};
+    const unit = ['intraday', 'swing'].includes(s.name) ? 'R' : '%/mo';
+    const recTxt = rec.n ? `n=${rec.n} · avg ${rec.avg != null ? (rec.avg >= 0 ? '+' : '') + rec.avg : '–'}${unit}` : '<span class="text-muted">none yet</span>';
+    return `<tr><td><b>${_aiEsc(s.name)}</b></td>
+      <td><span class="badge text-bg-${stCls[s.status] || 'secondary'}">${_aiEsc(s.status)}</span>
+        <div class="text-muted" style="font-size:.7rem">since ${_aiEsc((s.updated_at || '').slice(0, 10))}</div></td>
+      <td>${r.verdict ? `<span class="badge text-bg-${vCls(r.verdict)}">${_aiEsc(r.verdict)}</span>` : '<span class="text-muted">n/a</span>'}
+        <div class="text-muted" style="font-size:.7rem">${_aiEsc(r.detail || '')}</div></td>
+      <td>${recTxt}</td>
+      <td style="font-size:.72rem">${_aiEsc(ev.gate || s.reason || '')}</td></tr>`;
+  });
+  document.getElementById('strat-table').innerHTML = rows.join('') || '<tr><td colspan="5" class="text-muted">No strategies registered.</td></tr>';
+  document.getElementById('strat-events').innerHTML = (d.events || []).slice(0, 6).map(e =>
+    `${_aiEsc((e.ts || '').slice(0, 10))} · ${_aiEsc(e.name)}: ${_aiEsc(e.old_status || '—')} → ${_aiEsc(e.new_status)} (${_aiEsc(e.actor)})`).join('<br>');
+}
+
 async function refreshPerformance() {
+  refreshStrategies();
   refreshExpectancy();
   const [perf, eq] = await Promise.all([
     fetch('/api/performance?days=90').then(r => r.json()),
@@ -3341,6 +3374,13 @@ def api_research():
                          "live_all": r["live"]["all"], "live_oos": r["live"]["oos"],
                          "best_cfg": r["best_is"]["cfg"], "best_oos": r["best_is"]["oos"]}
                     for tf, r in res.items()})
+
+
+@app.route("/api/strategies")
+def api_strategies():
+    """Strategy registry with the gate's latest evidence, plus recent changes."""
+    from database import get_strategy_events, list_strategies
+    return jsonify({"strategies": list_strategies(), "events": get_strategy_events(limit=20)})
 
 
 @app.route("/api/equity-curve")

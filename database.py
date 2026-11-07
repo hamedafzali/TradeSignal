@@ -73,6 +73,16 @@ STRATEGY_SEED = {
               "vs simply holding, 0/27 configs positive out of sample"),
     "momentum": ("research", "Literature-backed (Jegadeesh-Titman, AQR, Barroso & "
                  "Santa-Clara); must pass the validation gate before paper"),
+    "lowvol": ("research", "Literature-backed low-volatility anomaly (Blitz & van Vliet, "
+               "Frazzini & Pedersen); must pass the validation gate before paper"),
+    "trend_alloc": ("research", "Literature-backed multi-asset trend following (Faber GTAA, "
+                    "Hurst-Ooi-Pedersen); must pass the validation gate before paper"),
+}
+# Monthly portfolio strategies: module (CLI with --paper --region) and regions
+PORTFOLIO_STRATEGIES = {
+    "momentum": ("momentum.py", ["us", "eu"]),
+    "lowvol": ("lowvol.py", ["us", "eu"]),
+    "trend_alloc": ("trend_alloc.py", ["global"]),
 }
 
 

@@ -907,6 +907,8 @@ async def weekly_research(context: ContextTypes.DEFAULT_TYPE) -> None:
     for label, script, args in (
         ("daily", "research_daily.py", []),
         ("momentum", "momentum.py", ["--region", "all"]),
+        ("lowvol", "lowvol.py", ["--region", "all"]),
+        ("trend_alloc", "trend_alloc.py", []),
     ):
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -961,46 +963,45 @@ async def weekly_research(context: ContextTypes.DEFAULT_TYPE) -> None:
                 pass
 
 
-async def momentum_paper_tracker(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Daily, idempotent: once a month is complete, record the momentum
-    target portfolio for it (paper). Dormant unless momentum is paper/live —
-    i.e. until it has passed the research gate."""
+async def portfolio_paper_tracker(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Daily, idempotent: once a month is complete, record the target
+    portfolio of every monthly strategy that is paper or live. Strategies in
+    'research' stay dormant until they pass the gate."""
     import asyncio
     import sys as _sys
-    if get_strategy_status("momentum") not in ("paper", "live"):
-        return
-    try:
-        from database import get_paper_rebalances
-        from momentum import last_completed_month
-        from strategy_gate import research_evidence
-        regions = (research_evidence("momentum") or {}).get("regions") or ["us", "eu"]
-        want = last_completed_month()
-        todo = [r for r in regions
-                if not any(x["asof"][:7] == want for x in get_paper_rebalances("momentum", r))]
-        if not todo:
-            return
-        here = os.path.dirname(os.path.abspath(__file__))
-        for reg in todo:
-            proc = await asyncio.create_subprocess_exec(
-                _sys.executable, "momentum.py", "--paper", "--region", reg, cwd=here,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                env={**os.environ, "PYTHONWARNINGS": "ignore"},
-            )
-            out, err = await asyncio.wait_for(proc.communicate(), timeout=1800)
-            msg = (out or b"").decode(errors="replace").strip()
-            if proc.returncode != 0:
-                logger.error(f"[momentum] paper rebalance {reg} failed: "
-                             f"{(err or b'').decode(errors='replace').strip().splitlines()[-1:]}")
-            elif msg:
-                logger.info(f"[momentum] paper rebalance {msg}")
-                if ADMIN_CHAT_ID:
-                    try:
-                        await context.bot.send_message(
-                            chat_id=ADMIN_CHAT_ID, text=f"📒 Momentum paper rebalance: {msg}")
-                    except Exception:
-                        pass
-    except Exception as e:
-        logger.error(f"[momentum] paper tracker error: {e}")
+    from database import PORTFOLIO_STRATEGIES, get_paper_rebalances
+    from momentum import last_completed_month
+    from strategy_gate import research_evidence
+    here = os.path.dirname(os.path.abspath(__file__))
+    want = last_completed_month()
+    for name, (script, all_regions) in PORTFOLIO_STRATEGIES.items():
+        if get_strategy_status(name) not in ("paper", "live"):
+            continue
+        try:
+            regions = (research_evidence(name) or {}).get("regions") or all_regions
+            todo = [r for r in regions
+                    if not any(x["asof"][:7] == want for x in get_paper_rebalances(name, r))]
+            for reg in todo:
+                proc = await asyncio.create_subprocess_exec(
+                    _sys.executable, script, "--paper", "--region", reg, cwd=here,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    env={**os.environ, "PYTHONWARNINGS": "ignore"},
+                )
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=1800)
+                msg = (out or b"").decode(errors="replace").strip()
+                if proc.returncode != 0:
+                    logger.error(f"[{name}] paper rebalance {reg} failed: "
+                                 f"{(err or b'').decode(errors='replace').strip().splitlines()[-1:]}")
+                elif msg:
+                    logger.info(f"[{name}] paper rebalance {msg}")
+                    if ADMIN_CHAT_ID:
+                        try:
+                            await context.bot.send_message(
+                                chat_id=ADMIN_CHAT_ID, text=f"📒 {name} paper rebalance: {msg}")
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.error(f"[{name}] paper tracker error: {e}")
 
 
 async def nightly_db_backup(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2749,8 +2750,8 @@ def main() -> None:
     app.job_queue.run_daily(weekly_research,
                             time=datetime.strptime("05:00", "%H:%M").time(),
                             days=(6,))  # 6 = Saturday
-    # Momentum paper portfolio: dormant until momentum passes the gate
-    app.job_queue.run_daily(momentum_paper_tracker,
+    # Monthly portfolio strategies (paper): dormant until one passes the gate
+    app.job_queue.run_daily(portfolio_paper_tracker,
                             time=datetime.strptime("06:30", "%H:%M").time())
     # Swing (daily-bar) strategy scan: hourly, gated by symbols.swing_enabled
     app.job_queue.run_repeating(swing_scan_and_alert, interval=3600, first=90)

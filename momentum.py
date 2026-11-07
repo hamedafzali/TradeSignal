@@ -117,27 +117,36 @@ def target_weights(mc: pd.DataFrame, daily_ret: pd.DataFrame, index_m: pd.Series
     return w, info
 
 
-def backtest(daily_close: pd.DataFrame, cfg: dict) -> pd.DataFrame:
-    """Monthly portfolio vs equal-weight universe, net of turnover costs."""
+def backtest(daily_close: pd.DataFrame, cfg: dict, weight_fn=None,
+             bench_cols: list[str] | None = None) -> pd.DataFrame:
+    """Monthly portfolio vs equal-weight universe (or `bench_cols`), net of
+    turnover costs. `weight_fn(mc, daily_ret, index_m, m, cfg)` -> (weights,
+    info) defaults to momentum's target_weights; the engine is shared by every
+    monthly portfolio strategy so they are all tested the same way."""
+    weight_fn = weight_fn or target_weights
     daily_ret = daily_close.pct_change(fill_method=None)
     mc = month_ends(daily_close)
     index_m = month_ends(market_index(daily_ret).to_frame("i"))["i"]
     fwd = mc.pct_change(fill_method=None).shift(-1)
     cost_side = pd.Series({s: DEFAULT_COST_PCT[market_of(s)] / 200 for s in mc.columns})
+    bench_mask = (pd.Series(mc.columns.isin(bench_cols), index=mc.columns)
+                  if bench_cols else pd.Series(True, index=mc.columns))
+    need = cfg.get("min_assets", 2 * cfg.get("k", 1))
     prev = pd.Series(0.0, index=mc.columns)
     rows = []
     for m in mc.index[:-1]:
         fr = fwd.loc[m]
-        w, info = target_weights(mc, daily_ret, index_m, m, cfg)
+        w, info = weight_fn(mc, daily_ret, index_m, m, cfg)
         avail = fr.notna() & mc.loc[m].notna()
-        if avail.sum() < 2 * cfg["k"]:
+        if avail.sum() < need or (avail & bench_mask).sum() == 0:
             prev[:] = 0.0
             continue
         w = w.where(avail, 0.0)
         cost = float(((w - prev).abs() * cost_side).sum())
         port = float((w * fr.fillna(0)).sum()) - cost
         rows.append({"t": m + pd.offsets.MonthEnd(1), "port": port,
-                     "bench": float(fr[avail].mean()), "exposure": float(w.sum()),
+                     "bench": float(fr[avail & bench_mask].mean()),
+                     "exposure": float(w.sum()),
                      "turnover": float((w - prev).abs().sum())})
         grown = w * (1 + fr.fillna(0))
         tot = float(grown.sum() + (1 - w.sum()))   # cash earns 0
@@ -183,9 +192,9 @@ def _key(c: dict) -> str:
     return ",".join(f"{k}={v}" for k, v in c.items())
 
 
-def _neighbours(cfg: dict) -> list[dict]:
+def _neighbours(cfg: dict, grid: dict | None = None) -> list[dict]:
     out = []
-    for k, vals in GRID.items():
+    for k, vals in (grid or GRID).items():
         i = vals.index(cfg[k])
         for j in (i - 1, i + 1):
             if 0 <= j < len(vals):
@@ -217,9 +226,17 @@ def load_closes(symbols: list[str], download: bool) -> pd.DataFrame:
     return pd.DataFrame(cols).sort_index()
 
 
-def study(daily_close: pd.DataFrame, region: str) -> dict:
-    cfgs = [dict(zip(GRID, v)) for v in itertools.product(*GRID.values())]
-    runs = {_key(c): backtest(daily_close, c) for c in cfgs}
+def study(daily_close: pd.DataFrame, region: str, weight_fn=None, grid: dict | None = None,
+          default: dict | None = None, prior_trials: int | None = None,
+          bench_cols: list[str] | None = None) -> dict:
+    """In-sample = first 2/3 of the months, out-of-sample = last 1/3. The
+    pre-registered `default` config is what the verdict is about; the best
+    in-sample config is reported for information only."""
+    grid = grid or GRID
+    default = default or DEFAULT_CFG
+    prior_trials = PRIOR_TRIALS if prior_trials is None else prior_trials
+    cfgs = [dict(zip(grid, v)) for v in itertools.product(*grid.values())]
+    runs = {_key(c): backtest(daily_close, c, weight_fn, bench_cols) for c in cfgs}
     first = min(r.index[0] for r in runs.values() if not r.empty)
     last = max(r.index[-1] for r in runs.values() if not r.empty)
     cut = first + (last - first) * 2 / 3
@@ -240,16 +257,17 @@ def study(daily_close: pd.DataFrame, region: str) -> dict:
 
     best_cfg = max(cfgs, key=lambda c: res[_key(c)]["is"].get("alpha_mo", -9))
     out = {}
-    for label, cfg in (("default", DEFAULT_CFG), ("best_is", best_cfg)):
+    for label, cfg in (("default", default), ("best_is", best_cfg)):
         p = pick(cfg)
-        nb = _neighbours(cfg)
-        plateau = sum(1 for c in nb if res[_key(c)]["oos"].get("alpha_mo", -1) > 0) / len(nb)
+        nb = _neighbours(cfg, grid)
+        plateau = (sum(1 for c in nb if res[_key(c)]["oos"].get("alpha_mo", -1) > 0) / len(nb)
+                   if nb else 0.0)
         # Deflated Sharpe on the OOS months, penalised for every variant tried
         b = runs[_key(cfg)]
         b = b[b.index >= cut]["port"]
         srs = [float(r[r.index >= cut]["port"].mean() / r[r.index >= cut]["port"].std())
                for r in runs.values() if len(r[r.index >= cut]) > 12]
-        dsr = deflated_sharpe(b.to_numpy(), srs, n_trials=len(cfgs) + PRIOR_TRIALS)
+        dsr = deflated_sharpe(b.to_numpy(), srs, n_trials=len(cfgs) + prior_trials)
         p.update({"plateau": round(plateau, 2), "dsr": None if dsr is None else round(dsr, 3)})
         p["verdict"] = verdict(p["oos"], plateau, dsr)
         out[label] = p
@@ -291,19 +309,22 @@ def last_completed_month(today: datetime | None = None) -> str:
     return f"{y:04d}-{m:02d}"
 
 
-def paper_rebalance(regions: list[str], download: bool = True,
-                    cfg: dict | None = None) -> list[str]:
+def paper_rebalance(regions: list[str], download: bool = True, cfg: dict | None = None,
+                    strategy: str = "momentum", universes: dict | None = None,
+                    weight_fn=None, bench_cols: dict | None = None) -> list[str]:
     """Record the target portfolio at the last completed month end for each
     region (idempotent). The paper record is the return of each recorded
-    portfolio up to the next one — see strategy_gate.momentum_paper_returns."""
+    portfolio up to the next one — see strategy_gate.portfolio_paper_returns."""
     from database import get_paper_rebalances, save_paper_rebalance
     cfg = cfg or DEFAULT_CFG
+    universes = universes or UNIVERSES
+    weight_fn = weight_fn or target_weights
     want = last_completed_month()
     done = []
     for reg in regions:
-        if any(r["asof"][:7] == want for r in get_paper_rebalances("momentum", reg)):
+        if any(r["asof"][:7] == want for r in get_paper_rebalances(strategy, reg)):
             continue
-        closes = load_closes(UNIVERSES[reg], download=download)
+        closes = load_closes(universes[reg], download=download)
         mc = month_ends(closes)
         ms = [m for m in mc.index if m.strftime("%Y-%m") == want]
         if not ms:
@@ -312,14 +333,16 @@ def paper_rebalance(regions: list[str], download: bool = True,
         m = ms[0]
         daily_ret = closes.pct_change(fill_method=None)
         index_m = month_ends(market_index(daily_ret).to_frame("i"))["i"]
-        w, info = target_weights(mc, daily_ret, index_m, m, cfg)
+        w, info = weight_fn(mc, daily_ret, index_m, m, cfg)
         w = w[w > 0]
         prices = {s: round(float(p), 6) for s, p in mc.loc[m].dropna().items()}
         info = {**info, "cfg": cfg, "exposure": round(float(w.sum()), 3)}
-        if save_paper_rebalance("momentum", reg, m.strftime("%Y-%m-%d"),
+        if bench_cols and bench_cols.get(reg):
+            info["bench_symbols"] = bench_cols[reg]
+        if save_paper_rebalance(strategy, reg, m.strftime("%Y-%m-%d"),
                                 {s: round(float(v), 6) for s, v in w.items()}, prices, info):
             done.append(f"{reg} {m.date()}: {len(w)} holdings, exposure {w.sum():.0%}"
-                        + ("" if info["trend_ok"] else " (trend filter: cash)"))
+                        + ("" if info.get("trend_ok", True) else " (trend filter: cash)"))
     return done
 
 

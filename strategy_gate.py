@@ -6,7 +6,7 @@ are applied mechanically every week after the research runs:
 
   research -> paper   automatically, when held-out research is DATA VALIDATED
                       (net-of-cost CI above 0, robust neighbourhood, and for
-                      momentum a deflated Sharpe >= 0.95).
+                      monthly portfolio strategies a deflated Sharpe >= 0.95).
   paper    -> live    NEVER automatic. The admin is told a strategy is
                       eligible once research is DATA VALIDATED and it has
                       >= 90 days of paper record with positive net expectancy
@@ -36,8 +36,14 @@ DATA = os.path.join(_DIR, "data")
 DD_MULT = 1.5
 PAPER_DAYS_FOR_LIVE = 90
 # minimum record size: (to call it confidently negative, to call it eligible)
-MIN_N = {"intraday": (30, 30), "swing": (30, 30), "momentum": (6, 3)}
-UNIT = {"intraday": "R", "swing": "R", "momentum": "%/mo"}
+MIN_N = {"intraday": (30, 30), "swing": (30, 30),
+         "momentum": (6, 3), "lowvol": (6, 3), "trend_alloc": (6, 3)}
+UNIT = {"intraday": "R", "swing": "R",
+        "momentum": "%/mo", "lowvol": "%/mo", "trend_alloc": "%/mo"}
+# Monthly portfolio strategies -> their research results file (keyed by region)
+PORTFOLIO_RESULTS = {"momentum": "research_momentum.json",
+                     "lowvol": "research_lowvol.json",
+                     "trend_alloc": "research_trend_alloc.json"}
 
 
 def _load(name: str) -> dict | None:
@@ -76,8 +82,8 @@ def research_evidence(name: str) -> dict | None:
                           f"[{lo.get('exc_lo')} … {lo.get('exc_hi')}] (n={lo.get('n')}), "
                           f"grid OOS-positive {s.get('grid_oos_positive')}",
                 "generated_at": d.get("generated_at")}
-    if name == "momentum":
-        d = _load("research_momentum.json") or {}
+    if name in PORTFOLIO_RESULTS:
+        d = _load(PORTFOLIO_RESULTS[name]) or {}
         regs = {k: v["default"] for k, v in d.items() if isinstance(v, dict) and "default" in v}
         if not regs:
             return None
@@ -118,7 +124,7 @@ def signal_record(mode: str, since: str | None, published: bool) -> dict:
             "dd": round(dd, 2)}
 
 
-def momentum_paper_returns(rebalances: list[dict]) -> list[dict]:
+def portfolio_paper_returns(rebalances: list[dict]) -> list[dict]:
     """Monthly paper returns from consecutive rebalances: each month holds the
     previous target weights from one rebalance's prices to the next one's,
     net of turnover cost; excess is vs the equal-weight universe."""
@@ -132,7 +138,9 @@ def momentum_paper_returns(rebalances: list[dict]) -> list[dict]:
         cost = sum(abs(w.get(s, 0) - prev_w.get(s, 0)) * DEFAULT_COST_PCT[market_of(s)] / 200
                    for s in set(w) | set(prev_w))
         port = sum(wt * rets.get(s, 0.0) for s, wt in w.items()) - cost
-        bench = sum(rets.values()) / len(rets)
+        bsyms = (a.get("info") or {}).get("bench_symbols")
+        brets = [rets[s] for s in bsyms if s in rets] if bsyms else list(rets.values())
+        bench = sum(brets) / len(brets) if brets else 0.0
         out.append({"t": b["asof"], "port": port, "bench": bench, "excess": port - bench})
         prev_w = {s: wt * (1 + rets.get(s, 0.0)) for s, wt in w.items()}
         tot = sum(prev_w.values()) + (1 - sum(w.values()))
@@ -140,15 +148,19 @@ def momentum_paper_returns(rebalances: list[dict]) -> list[dict]:
     return out
 
 
-def momentum_record(since: str | None) -> dict:
-    """Paper/live record of momentum, pooled over regions, in % per month."""
+momentum_paper_returns = portfolio_paper_returns   # backwards-compatible name
+
+
+def portfolio_record(name: str, since: str | None) -> dict:
+    """Paper/live record of a monthly portfolio strategy, pooled over regions,
+    in % per month (excess vs its equal-weight universe)."""
     from database import get_paper_rebalances
     months = []
     regions = {}
-    for rb in get_paper_rebalances("momentum"):
+    for rb in get_paper_rebalances(name):
         regions.setdefault(rb["region"], []).append(rb)
     for reg, rbs in regions.items():
-        months += momentum_paper_returns(rbs)
+        months += portfolio_paper_returns(rbs)
     if since:
         months = [m for m in months if m["t"] >= since[:10]]
     months.sort(key=lambda m: m["t"])
@@ -232,8 +244,8 @@ def evaluate_all(apply: bool = True) -> list[dict]:
             continue
         research = research_evidence(name)
         since = s.get("updated_at")
-        if name == "momentum":
-            record = momentum_record(since)
+        if name in PORTFOLIO_RESULTS:
+            record = portfolio_record(name, since)
         else:
             record = signal_record(name, since, published=(status == "live"))
         d = decide(name, status, research, record, _days_since(since))
