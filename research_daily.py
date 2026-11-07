@@ -52,7 +52,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
-from edge_stats import DEFAULT_COST_PCT, clustered_mean_ci, market_of
+from edge_stats import DEFAULT_COST_PCT, clustered_mean_ci, market_of, max_drawdown_r
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(_DIR, "data", "research_cache")
@@ -327,6 +327,9 @@ def score_trades(trades: list[dict], drift: dict, cost_scale: float = 1.0,
            "avg_days": round(float(np.mean(days)), 1)}
     if r:
         out["avg_r"] = round(float(np.mean(r)), 3)
+        rt = sorted((t["t"], v / t["sl_pct"]) for t, v in zip(trades, net)
+                    if t.get("sl_pct", 0) > 0)
+        out["max_dd_r"] = max_drawdown_r([x for _, x in rt])
     return out
 
 

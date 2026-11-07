@@ -93,3 +93,46 @@ def verdict(s: dict, min_n: int = 30) -> str:
     if s["ci_lo"] > 0:
         return "EDGE"
     return "UNPROVEN"
+
+
+def deflated_sharpe(returns, trial_srs: list[float], n_trials: int) -> float | None:
+    """
+    Deflated Sharpe Ratio (Bailey & Lopez de Prado, 2014): probability that
+    the true Sharpe of `returns` is above what the best of `n_trials` random
+    strategies would show by luck. >= 0.95 is the usual bar.
+
+    returns    per-period returns of the selected strategy
+    trial_srs  per-period Sharpe ratios of the variants tried (for their spread)
+    n_trials   how many variants were tried in total (incl. earlier studies)
+    """
+    from statistics import NormalDist
+    r = [float(x) for x in returns if x == x]
+    t = len(r)
+    if t < 12 or len(trial_srs) < 2 or n_trials < 2:
+        return None
+    mean = sum(r) / t
+    sd = math.sqrt(sum((x - mean) ** 2 for x in r) / (t - 1))
+    if sd == 0:
+        return None
+    sr = mean / sd
+    skew = sum(((x - mean) / sd) ** 3 for x in r) / t
+    kurt = sum(((x - mean) / sd) ** 4 for x in r) / t
+    m = sum(trial_srs) / len(trial_srs)
+    v = sum((s - m) ** 2 for s in trial_srs) / (len(trial_srs) - 1)
+    nd, g = NormalDist(), 0.5772156649
+    sr0 = math.sqrt(v) * ((1 - g) * nd.inv_cdf(1 - 1 / n_trials)
+                          + g * nd.inv_cdf(1 - 1 / (n_trials * math.e)))
+    denom = 1 - skew * sr + (kurt - 1) / 4 * sr ** 2
+    if denom <= 0:
+        return None
+    return nd.cdf((sr - sr0) * math.sqrt(t - 1) / math.sqrt(denom))
+
+
+def max_drawdown_r(rs: list[float]) -> float:
+    """Worst peak-to-trough fall of a cumulative R (or %) curve, >= 0."""
+    peak = cum = dd = 0.0
+    for r in rs:
+        cum += r
+        peak = max(peak, cum)
+        dd = max(dd, peak - cum)
+    return round(dd, 2)

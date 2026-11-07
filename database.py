@@ -64,6 +64,18 @@ def backup_db(keep: int = 7) -> str:
     return dest_path
 
 
+STRATEGY_STATUSES = ("research", "paper", "live", "retired")
+STRATEGY_SEED = {
+    "intraday": ("paper", "Research 2026-11-06: NO EDGE net of costs — live record "
+                 "-0.245R/trade (n=255), 5m replay -0.29R, 1h 2-year replay 0/144 "
+                 "configs positive out of sample"),
+    "swing": ("paper", "Research 2026-11-06: NO EDGE — 20y daily backtest -0.36%/trade "
+              "vs simply holding, 0/27 configs positive out of sample"),
+    "momentum": ("research", "Literature-backed (Jegadeesh-Titman, AQR, Barroso & "
+                 "Santa-Clara); must pass the validation gate before paper"),
+}
+
+
 def init_db() -> None:
     with _conn() as conn:
         conn.executescript("""
@@ -279,6 +291,38 @@ def init_db() -> None:
             -- AI-only signals suppressed by shadow mode, tracked so their
             -- hypothetical outcomes can be resolved: the evidence base for
             -- deciding whether (and per-symbol where) to lift shadow mode.
+            -- Strategy registry: research -> paper -> live -> retired.
+            -- Only 'live' strategies reach users; 'paper' ones keep logging
+            -- signals (published=0) so their record keeps growing.
+            CREATE TABLE IF NOT EXISTS strategies (
+                name        TEXT PRIMARY KEY,
+                status      TEXT NOT NULL,
+                reason      TEXT,
+                evidence    TEXT,
+                updated_at  TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS strategy_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT NOT NULL,
+                ts          TEXT NOT NULL,
+                old_status  TEXT,
+                new_status  TEXT NOT NULL,
+                reason      TEXT,
+                actor       TEXT
+            );
+            -- Paper portfolio for monthly-rebalanced strategies (momentum)
+            CREATE TABLE IF NOT EXISTS paper_rebalances (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                strategy    TEXT NOT NULL,
+                region      TEXT NOT NULL,
+                asof        TEXT NOT NULL,
+                created_at  TEXT NOT NULL,
+                weights     TEXT NOT NULL,
+                prices      TEXT NOT NULL,
+                info        TEXT,
+                UNIQUE(strategy, region, asof)
+            );
+
             CREATE TABLE IF NOT EXISTS shadow_signals (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol            TEXT NOT NULL,
@@ -312,6 +356,9 @@ def init_db() -> None:
             "suggested_size_pct": "REAL",
             "regime": "TEXT DEFAULT 'unknown'",
             "mode": "TEXT DEFAULT 'intraday'",
+            # 1 = sent to users; 0 = paper (strategy not live) — logged and
+            # resolved like any signal, but never shown as a recommendation
+            "published": "INTEGER DEFAULT 1",
         }
         for col, sql_type in signal_migrations.items():
             if col not in signal_cols:
@@ -344,6 +391,16 @@ def init_db() -> None:
         shadow_cols = [r[1] for r in conn.execute("PRAGMA table_info(shadow_signals)").fetchall()]
         if shadow_cols and "source" not in shadow_cols:
             conn.execute("ALTER TABLE shadow_signals ADD COLUMN source TEXT DEFAULT 'shadow_ai'")
+        # Seed the registry once (never overwrites a later decision)
+        now = datetime.utcnow().isoformat()
+        for name, (status, reason) in STRATEGY_SEED.items():
+            if conn.execute("SELECT 1 FROM strategies WHERE name=?", (name,)).fetchone():
+                continue
+            conn.execute("INSERT INTO strategies (name, status, reason, updated_at) "
+                         "VALUES (?, ?, ?, ?)", (name, status, reason, now))
+            conn.execute("INSERT INTO strategy_events (name, ts, old_status, new_status, "
+                         "reason, actor) VALUES (?, ?, NULL, ?, ?, 'seed')",
+                         (name, now, status, reason))
         # llm_calls request/response transcript columns (audit log of what was
         # sent to and received from the LLM provider)
         llm_cols = [r[1] for r in conn.execute("PRAGMA table_info(llm_calls)").fetchall()]
@@ -380,8 +437,8 @@ def log_signal(sig: dict, features: dict | None = None) -> int:
             INSERT INTO signals
                 (symbol, action, strength, price, tp, sl, tp_pct, sl_pct, rr,
                  rsi, trend, quality, ai_confidence, vol_spike, reasons, features,
-                 sent_at, suggested_size_pct, regime, mode)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 sent_at, suggested_size_pct, regime, mode, published)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             sig["symbol"], sig["action"], sig.get("strength", "RULE"),
             sig.get("price"), sig.get("tp"), sig.get("sl"),
@@ -394,6 +451,7 @@ def log_signal(sig: dict, features: dict | None = None) -> int:
             sig.get("suggested_size_pct"),
             sig.get("regime", "unknown"),
             sig.get("mode", "intraday"),
+            1 if sig.get("published", True) else 0,
         ))
         return cur.lastrowid
 
@@ -413,13 +471,16 @@ def set_swing_enabled(symbol: str, enabled: bool) -> None:
                      (1 if enabled else 0, symbol))
 
 
-def get_last_signal_action(symbol: str, within_hours: int = 6) -> str | None:
-    """Persistent deduplication — survives restarts."""
+def get_last_signal_action(symbol: str, within_hours: int = 6,
+                           published_only: bool = False) -> str | None:
+    """Persistent deduplication — survives restarts. published_only=True for
+    anything shown to users (paper signals are not recommendations)."""
     cutoff = (datetime.utcnow() - timedelta(hours=within_hours)).isoformat()
+    pub = " AND COALESCE(published, 1) = 1" if published_only else ""
     with _conn() as conn:
-        row = conn.execute("""
+        row = conn.execute(f"""
             SELECT action FROM signals
-            WHERE symbol = ? AND sent_at >= ?
+            WHERE symbol = ? AND sent_at >= ?{pub}
             ORDER BY sent_at DESC LIMIT 1
         """, (symbol, cutoff)).fetchone()
         return row["action"] if row else None
@@ -938,23 +999,25 @@ def get_all_subscriber_ids() -> list[str]:
 
 # ── Dashboard stats ───────────────────────────────────────────────────────────
 
-def get_stats() -> dict:
+def get_stats(published_only: bool = False) -> dict:
+    pub = " AND COALESCE(published, 1) = 1" if published_only else ""
     with _conn() as conn:
         total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        total_signals = conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
+        total_signals = conn.execute(
+            f"SELECT COUNT(*) FROM signals WHERE 1=1{pub}").fetchone()[0]
         today = datetime.utcnow().date().isoformat()
         today_signals = conn.execute(
-            "SELECT COUNT(*) FROM signals WHERE sent_at LIKE ?", (f"{today}%",)
+            f"SELECT COUNT(*) FROM signals WHERE sent_at LIKE ?{pub}", (f"{today}%",)
         ).fetchone()[0]
         # Include all symbols that ever received a signal, not just currently-active ones.
         # Historical performance matters even if a symbol was later deactivated.
-        symbol_rows = conn.execute("""
+        symbol_rows = conn.execute(f"""
             SELECT symbol,
                    COUNT(*) AS total,
                    SUM(CASE WHEN outcome='correct'   THEN 1 ELSE 0 END) AS correct,
                    SUM(CASE WHEN outcome='incorrect' THEN 1 ELSE 0 END) AS incorrect,
                    SUM(CASE WHEN outcome='neutral'   THEN 1 ELSE 0 END) AS neutral
-            FROM signals
+            FROM signals WHERE 1=1{pub}
             GROUP BY symbol
         """).fetchall()
         correct = sum(r["correct"] for r in symbol_rows)
@@ -1020,18 +1083,19 @@ def get_weekly_stats() -> dict:
                    SUM(CASE WHEN outcome='incorrect' THEN 1 ELSE 0 END) AS incorrect,
                    SUM(CASE WHEN outcome='neutral'   THEN 1 ELSE 0 END) AS neutral
             FROM signals
-            WHERE sent_at >= ?
+            WHERE sent_at >= ? AND COALESCE(published, 1) = 1
               AND symbol IN (SELECT symbol FROM symbols WHERE active=1)
             GROUP BY symbol, action
         """, (cutoff,)).fetchall()
+        pub = " AND COALESCE(published, 1) = 1"
         total = conn.execute(
-            "SELECT COUNT(*) FROM signals WHERE sent_at >= ?", (cutoff,)
+            f"SELECT COUNT(*) FROM signals WHERE sent_at >= ?{pub}", (cutoff,)
         ).fetchone()[0]
         correct_total = conn.execute(
-            "SELECT COUNT(*) FROM signals WHERE outcome = 'correct' AND sent_at >= ?", (cutoff,)
+            f"SELECT COUNT(*) FROM signals WHERE outcome = 'correct' AND sent_at >= ?{pub}", (cutoff,)
         ).fetchone()[0]
         incorrect_total = conn.execute(
-            "SELECT COUNT(*) FROM signals WHERE outcome = 'incorrect' AND sent_at >= ?", (cutoff,)
+            f"SELECT COUNT(*) FROM signals WHERE outcome = 'incorrect' AND sent_at >= ?{pub}", (cutoff,)
         ).fetchone()[0]
         resolved_total = correct_total + incorrect_total
     accuracy = round(correct_total / resolved_total * 100, 1) if resolved_total > 0 else 0
@@ -2074,7 +2138,10 @@ def get_cost_settings() -> dict[str, float]:
 
 
 def get_expectancy_stats(days: int | None = None,
-                         active_only: bool = False) -> dict:
+                         active_only: bool = False,
+                         mode: str | None = None,
+                         since: str | None = None,
+                         published: bool | None = None) -> dict:
     """
     Honest scoreboard: per-trade R-multiples, gross and net of costs, with a
     day-clustered 95% CI on the mean.
@@ -2095,6 +2162,15 @@ def get_expectancy_stats(days: int | None = None,
         params.append((datetime.utcnow() - timedelta(days=days)).isoformat())
     if active_only:
         where.append("symbol IN (SELECT symbol FROM symbols WHERE active=1)")
+    if mode:
+        where.append("COALESCE(mode, 'intraday') = ?")
+        params.append(mode)
+    if since:
+        where.append("sent_at >= ?")
+        params.append(since)
+    if published is not None:
+        where.append("COALESCE(published, 1) = ?")
+        params.append(1 if published else 0)
     with _conn() as conn:
         rows = conn.execute(f"""
             SELECT symbol, action, price, tp, sl, outcome, outcome_price,
@@ -2266,3 +2342,101 @@ def get_regime_attribution(days: int = 90) -> list[dict]:
         }
         for r in rows
     ]
+
+
+# ── Strategy registry ─────────────────────────────────────────────────────────
+
+def get_strategy(name: str) -> dict | None:
+    with _conn() as conn:
+        row = conn.execute("SELECT * FROM strategies WHERE name=?", (name,)).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["evidence"] = json.loads(d["evidence"]) if d.get("evidence") else None
+    return d
+
+
+def get_strategy_status(name: str) -> str:
+    """Unknown strategies are treated as 'paper' — nothing reaches users
+    without an explicit decision."""
+    s = get_strategy(name)
+    return s["status"] if s else "paper"
+
+
+def is_strategy_live(name: str) -> bool:
+    return get_strategy_status(name) == "live"
+
+
+def list_strategies() -> list[dict]:
+    with _conn() as conn:
+        rows = conn.execute("SELECT * FROM strategies ORDER BY name").fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["evidence"] = json.loads(d["evidence"]) if d.get("evidence") else None
+        out.append(d)
+    return out
+
+
+def set_strategy_status(name: str, status: str, reason: str,
+                        actor: str = "system") -> bool:
+    """Change status and record the event. Returns True if it changed."""
+    if status not in STRATEGY_STATUSES:
+        raise ValueError(f"bad status {status!r}")
+    now = datetime.utcnow().isoformat()
+    with _conn() as conn:
+        row = conn.execute("SELECT status FROM strategies WHERE name=?", (name,)).fetchone()
+        old = row["status"] if row else None
+        if old == status:
+            return False
+        conn.execute("""
+            INSERT INTO strategies (name, status, reason, updated_at) VALUES (?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET status=excluded.status,
+                reason=excluded.reason, updated_at=excluded.updated_at
+        """, (name, status, reason, now))
+        conn.execute("""INSERT INTO strategy_events
+            (name, ts, old_status, new_status, reason, actor) VALUES (?, ?, ?, ?, ?, ?)""",
+                     (name, now, old, status, reason, actor))
+    return True
+
+
+def set_strategy_evidence(name: str, evidence: dict) -> None:
+    with _conn() as conn:
+        conn.execute("UPDATE strategies SET evidence=? WHERE name=?",
+                     (json.dumps(evidence, default=str), name))
+
+
+def get_strategy_events(limit: int = 50) -> list[dict]:
+    with _conn() as conn:
+        rows = conn.execute("SELECT * FROM strategy_events ORDER BY id DESC LIMIT ?",
+                            (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def save_paper_rebalance(strategy: str, region: str, asof: str, weights: dict,
+                         prices: dict, info: dict) -> bool:
+    """Record one month's target portfolio. Returns False if already recorded."""
+    with _conn() as conn:
+        cur = conn.execute("""
+            INSERT OR IGNORE INTO paper_rebalances
+                (strategy, region, asof, created_at, weights, prices, info)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (strategy, region, asof, datetime.utcnow().isoformat(),
+              json.dumps(weights), json.dumps(prices), json.dumps(info, default=str)))
+        return cur.rowcount > 0
+
+
+def get_paper_rebalances(strategy: str, region: str | None = None) -> list[dict]:
+    q, p = "SELECT * FROM paper_rebalances WHERE strategy=?", [strategy]
+    if region:
+        q += " AND region=?"
+        p.append(region)
+    with _conn() as conn:
+        rows = conn.execute(q + " ORDER BY asof ASC", p).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        for k in ("weights", "prices", "info"):
+            d[k] = json.loads(d[k]) if d.get(k) else {}
+        out.append(d)
+    return out

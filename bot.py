@@ -57,6 +57,12 @@ from database import (
     get_user_subscriptions,
     get_users_with_open_position,
     get_weekly_stats,
+    get_strategy_events,
+    get_strategy_status,
+    is_strategy_live,
+    list_strategies,
+    set_strategy_status,
+    STRATEGY_STATUSES,
     init_db,
     log_learning_cycle,
     log_scan,
@@ -897,6 +903,46 @@ async def weekly_research(context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as e:
             logger.error(f"[research] {tf} error: {e}")
             lines.append(f"{tf}: ❌ {e}")
+    # Daily-bar strategies (swing etc.) and cross-sectional momentum
+    for label, script, args in (
+        ("daily", "research_daily.py", []),
+        ("momentum", "momentum.py", ["--region", "all"]),
+    ):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                _sys.executable, script, *args, cwd=here,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+                env={**os.environ, "PYTHONWARNINGS": "ignore"},
+            )
+            _, err = await asyncio.wait_for(proc.communicate(), timeout=3 * 3600)
+            if proc.returncode != 0:
+                tail = (err or b"").decode(errors="replace").strip().splitlines()[-1:]
+                logger.error(f"[research] {label} failed rc={proc.returncode}: {tail}")
+                lines.append(f"{label}: ❌ failed")
+        except Exception as e:
+            logger.error(f"[research] {label} error: {e}")
+            lines.append(f"{label}: ❌ {e}")
+
+    # The gate: pre-registered promotion / demotion rules (strategy_gate.py)
+    try:
+        from strategy_gate import evaluate_all
+        rows = await asyncio.to_thread(evaluate_all, True)
+        lines.append("")
+        lines.append("*Strategy gate:*")
+        for r in rows:
+            arrow = f" → *{r['new_status']}*" if r["new_status"] else ""
+            star = " ⭐" if r["eligible"] else ""
+            res = r.get("research") or {}
+            lines.append(f"`{r['name']}` {r['status']}{arrow}{star} · research "
+                         f"{res.get('verdict', 'n/a')}")
+            if r["new_status"] or r["eligible"]:
+                lines.append(f"   {r['reason']}")
+        if any(r["eligible"] for r in rows):
+            lines.append("⭐ = eligible for live. Promote with `/strategy NAME live reason`.")
+    except Exception as e:
+        logger.error(f"[gate] evaluation failed: {e}")
+        lines.append(f"gate: ❌ {e}")
+
     if lines and ADMIN_CHAT_ID:
         try:
             await context.bot.send_message(
@@ -905,7 +951,56 @@ async def weekly_research(context: ContextTypes.DEFAULT_TYPE) -> None:
                 parse_mode="Markdown",
             )
         except Exception:
-            pass
+            try:  # reasons may contain Markdown-breaking characters
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text="🔬 Weekly research (held-out, net of costs)\n"
+                         + "\n".join(lines).replace("*", "").replace("`", ""),
+                )
+            except Exception:
+                pass
+
+
+async def momentum_paper_tracker(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Daily, idempotent: once a month is complete, record the momentum
+    target portfolio for it (paper). Dormant unless momentum is paper/live —
+    i.e. until it has passed the research gate."""
+    import asyncio
+    import sys as _sys
+    if get_strategy_status("momentum") not in ("paper", "live"):
+        return
+    try:
+        from database import get_paper_rebalances
+        from momentum import last_completed_month
+        from strategy_gate import research_evidence
+        regions = (research_evidence("momentum") or {}).get("regions") or ["us", "eu"]
+        want = last_completed_month()
+        todo = [r for r in regions
+                if not any(x["asof"][:7] == want for x in get_paper_rebalances("momentum", r))]
+        if not todo:
+            return
+        here = os.path.dirname(os.path.abspath(__file__))
+        for reg in todo:
+            proc = await asyncio.create_subprocess_exec(
+                _sys.executable, "momentum.py", "--paper", "--region", reg, cwd=here,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env={**os.environ, "PYTHONWARNINGS": "ignore"},
+            )
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=1800)
+            msg = (out or b"").decode(errors="replace").strip()
+            if proc.returncode != 0:
+                logger.error(f"[momentum] paper rebalance {reg} failed: "
+                             f"{(err or b'').decode(errors='replace').strip().splitlines()[-1:]}")
+            elif msg:
+                logger.info(f"[momentum] paper rebalance {msg}")
+                if ADMIN_CHAT_ID:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=ADMIN_CHAT_ID, text=f"📒 Momentum paper rebalance: {msg}")
+                    except Exception:
+                        pass
+    except Exception as e:
+        logger.error(f"[momentum] paper tracker error: {e}")
 
 
 async def nightly_db_backup(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1341,8 +1436,13 @@ async def scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
             feat = _current_features(df_1h, symbol=symbol) if df_1h is not None else (
                    _current_features(df_5m, symbol=symbol) if df_5m is not None else {})
             sig["company_name"] = _get_company_name(symbol)
+            # Strategy registry: only 'live' strategies reach users. Paper
+            # signals are still logged and resolved so the record keeps growing.
+            sig["published"] = is_strategy_live("intraday")
             log_signal(sig, features=feat)
             n_signals += 1
+            if not sig["published"]:
+                continue
 
             session = market_session(symbol)
             await _broadcast_signal(context.bot, sig, session)
@@ -1427,8 +1527,11 @@ async def swing_scan_and_alert(context: ContextTypes.DEFAULT_TYPE) -> None:
 
             sig["regime"] = get_market_regime()
             sig["company_name"] = _get_company_name(symbol)
+            sig["published"] = is_strategy_live("swing")
             log_signal(sig, features={})
             n_signals += 1
+            if not sig["published"]:
+                continue
             await _broadcast_signal(context.bot, sig, session="open")
 
             if ENABLE_SUBSCRIBER_DM_SIGNALS:
@@ -1449,7 +1552,9 @@ async def weekly_recap(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Post weekly performance summary to the channel every Monday."""
     if not CHANNEL_ID:
         return
-    stats = get_weekly_stats()
+    stats = get_weekly_stats()          # published (user-facing) signals only
+    if not stats["total"]:
+        return                          # nothing was sent — nothing to recap
     total = stats["total"]
     acc = stats["accuracy"]
     resolved = stats["resolved"]
@@ -1750,7 +1855,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await cmd_scan(_FakeUpdate(), _FakeCtx())
 
     elif action == "stats":
-        s = get_stats()
+        s = get_stats(published_only=True)
         acc = (f"{s['accuracy']}%  ({s['correct']}/{s['resolved']} resolved)"
                if s["resolved"] > 0 else "N/A — no resolved signals yet")
         sym_lines = "\n".join(
@@ -2100,7 +2205,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     log_user(uid, update.effective_user.username or "")
     pref = get_user_pref(uid)
     lang = pref["lang"]
-    s = get_stats()
+    s = get_stats(published_only=True)
     if s["resolved"] > 0:
         acc = t("stats_accuracy", lang=lang, pct=s["accuracy"],
                 correct=s["correct"], resolved=s["resolved"])
@@ -2268,6 +2373,11 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "after": "🌙 After-hours", "closed": "⛔ Market closed",
     }
     session_str = session_labels.get(session, "")
+    # The AI probabilities belong to the intraday strategy: shown only while
+    # it is live (has passed the gate). Otherwise they'd be unproven advice.
+    signals_live = is_strategy_live("intraday")
+    paused_note = ("\n\n_Signals are paused: no strategy has a proven edge net "
+                   "of costs yet. Indicators above are descriptive, not advice._")
 
     # /scan SYMBOL — detailed single-symbol analysis
     if context.args:
@@ -2316,6 +2426,8 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             ai_signal = ml_result.get("ai_signal")
 
             ai_lines = []
+            if not signals_live:
+                buy_prob = sell_prob = ai_signal = None
             if buy_prob is not None:
                 bar = "█" * int(buy_prob * 10) + "░" * (10 - int(buy_prob * 10))
                 ai_lines.append(f"  AI Buy:  `{bar}` `{buy_prob*100:.0f}%`")
@@ -2325,7 +2437,7 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if ai_signal:
                 ai_lines.append(f"  AI Signal: *{ai_signal}*")
 
-            last_sig = get_last_signal_action(symbol, within_hours=6)
+            last_sig = get_last_signal_action(symbol, within_hours=6, published_only=True)
             recent_line = f"\n⚡ Recent signal: *{last_sig}* (last 6h)" if last_sig else ""
 
             name = _get_company_name(symbol)
@@ -2343,6 +2455,7 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 + (f"\n🕐 1h bias: *{bias_1h}*" if bias_1h else "")
                 + ("\n\n*AI Analysis:*\n" + "\n".join(ai_lines) if ai_lines else "")
                 + recent_line
+                + ("" if signals_live else paused_note)
             )
             await update.message.reply_text(msg, parse_mode="Markdown")
         except Exception as e:
@@ -2376,7 +2489,7 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             elif rsi_val > 65:
                 flags.append(f"🔴 RSI {rsi_val:.0f} overbought")
 
-            last_sig = get_last_signal_action(symbol, within_hours=6)
+            last_sig = get_last_signal_action(symbol, within_hours=6, published_only=True)
             if last_sig:
                 flags.append(f"⚡ {last_sig} signal fired")
 
@@ -2385,7 +2498,7 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
             model = models.get(symbol)
             ai_buy = None
-            if model and not df.empty:
+            if signals_live and model and not df.empty:
                 ai_buy = model.predict(df, timeframe=interval).get("buy_prob")
             ai_text = f"  AI `{ai_buy*100:.0f}%`" if ai_buy is not None else ""
             crypto_tag = " ₿" if is_crypto(symbol) else ""
@@ -2399,7 +2512,8 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if interesting:
         await update.message.reply_text(
-            f"{session_str}\n\n" + "\n\n".join(interesting),
+            f"{session_str}\n\n" + "\n\n".join(interesting)
+            + ("" if signals_live else paused_note),
             parse_mode="Markdown",
         )
     else:
@@ -2408,6 +2522,49 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"Use `/scan SYMBOL` for a detailed view.",
             parse_mode="Markdown",
         )
+
+
+async def cmd_strategy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /strategy — registry; /strategy NAME STATUS reason… — change it.
+    Only 'live' strategies reach users. The weekly gate demotes automatically;
+    promotion to live is always a human decision."""
+    if str(update.effective_user.id) != ADMIN_CHAT_ID:
+        return
+    args = context.args or []
+    if len(args) >= 2:
+        name, status = args[0].lower(), args[1].lower()
+        reason = " ".join(args[2:]).strip()
+        if status not in STRATEGY_STATUSES:
+            await update.message.reply_text(f"Status must be one of: {', '.join(STRATEGY_STATUSES)}")
+            return
+        if not reason:
+            await update.message.reply_text("Give a reason: /strategy NAME STATUS reason…")
+            return
+        known = {s["name"] for s in list_strategies()}
+        if name not in known:
+            await update.message.reply_text(f"Unknown strategy. Known: {', '.join(sorted(known))}")
+            return
+        changed = set_strategy_status(name, status, reason, actor=f"admin:{update.effective_user.id}")
+        await update.message.reply_text(
+            f"{name}: {'now ' + status if changed else 'already ' + status}")
+        return
+
+    icon = {"live": "🟢", "paper": "📝", "research": "🔬", "retired": "⚫"}
+    lines = ["Strategy registry (only live reaches users)", ""]
+    for s in list_strategies():
+        ev = s.get("evidence") or {}
+        lines.append(f"{icon.get(s['status'], '·')} {s['name']}: {s['status']}  "
+                     f"(since {str(s.get('updated_at', ''))[:10]})")
+        lines.append(f"   {s.get('reason') or ''}")
+        if ev.get("gate"):
+            lines.append(f"   gate {str(ev.get('checked_at', ''))[:10]}: {ev['gate']}")
+    ev = get_strategy_events(limit=5)
+    if ev:
+        lines += ["", "Recent changes:"]
+        lines += [f"  {e['ts'][:10]} {e['name']}: {e['old_status']} → {e['new_status']} ({e['actor']})"
+                  for e in ev]
+    lines += ["", "Change: /strategy NAME STATUS reason…"]
+    await update.message.reply_text("\n".join(lines)[:4000])
 
 
 async def cmd_train(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2539,7 +2696,7 @@ def main() -> None:
         ("stats", cmd_stats), ("scan", cmd_scan),
         ("train", cmd_train), ("test", cmd_test),
         ("subscribe", cmd_subscribe), ("unsubscribe", cmd_unsubscribe),
-        ("backtest", cmd_backtest),
+        ("backtest", cmd_backtest), ("strategy", cmd_strategy),
     ]:
         app.add_handler(CommandHandler(cmd, fn))
 
@@ -2592,6 +2749,9 @@ def main() -> None:
     app.job_queue.run_daily(weekly_research,
                             time=datetime.strptime("05:00", "%H:%M").time(),
                             days=(6,))  # 6 = Saturday
+    # Momentum paper portfolio: dormant until momentum passes the gate
+    app.job_queue.run_daily(momentum_paper_tracker,
+                            time=datetime.strptime("06:30", "%H:%M").time())
     # Swing (daily-bar) strategy scan: hourly, gated by symbols.swing_enabled
     app.job_queue.run_repeating(swing_scan_and_alert, interval=3600, first=90)
 

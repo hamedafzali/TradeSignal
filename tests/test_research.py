@@ -3,9 +3,13 @@ import unittest
 import numpy as np
 import pandas as pd
 
+import os
+import tempfile
+
 import edge_stats
 import research
 import research_daily as rd
+import strategy_gate as gate
 
 
 class EdgeStatsTests(unittest.TestCase):
@@ -135,6 +139,109 @@ class DailySimTests(unittest.TestCase):
         s = rd.score_trades([t] * 40, {"AAPL": 0.2})       # 0.05% cost, 5d x 0.2%
         self.assertAlmostEqual(s["net"], 1.0)
         self.assertAlmostEqual(s["excess"], 0.0)
+
+
+class StatsExtraTests(unittest.TestCase):
+    def test_max_drawdown(self):
+        self.assertEqual(edge_stats.max_drawdown_r([1, 1, -3, 1, -1, 4]), 3.0)
+        self.assertEqual(edge_stats.max_drawdown_r([1, 2, 3]), 0.0)
+
+    def test_deflated_sharpe_penalises_many_trials(self):
+        rng = np.random.default_rng(1)
+        r = rng.normal(0.01, 0.04, 120)
+        srs = list(rng.normal(0.0, 0.1, 50))
+        few = edge_stats.deflated_sharpe(r, srs, n_trials=2)
+        many = edge_stats.deflated_sharpe(r, srs, n_trials=500)
+        self.assertGreater(few, many)
+        self.assertIsNone(edge_stats.deflated_sharpe(r[:5], srs, 10))
+
+    def test_deflated_sharpe_noise_is_low(self):
+        rng = np.random.default_rng(2)
+        srs = list(rng.normal(0.0, 0.1, 50))
+        self.assertLess(edge_stats.deflated_sharpe(rng.normal(0, 0.04, 120), srs, 100), 0.95)
+
+
+class GateTests(unittest.TestCase):
+    VAL = {"verdict": "DATA VALIDATED", "max_dd": 5.0, "detail": "x"}
+    REC_OK = {"n": 40, "avg": 0.1, "ci_hi": 0.3, "dd": 2.0}
+
+    def test_research_to_paper_only_when_validated(self):
+        self.assertEqual(gate.decide("swing", "research", self.VAL, {}, 1)["new_status"], "paper")
+        for v in ("TRADE-OFF", "NO EDGE", "INSUFFICIENT DATA"):
+            self.assertIsNone(gate.decide("swing", "research", {"verdict": v}, {}, 1)["new_status"])
+        self.assertIsNone(gate.decide("swing", "research", None, {}, 1)["new_status"])
+
+    def test_paper_never_auto_live(self):
+        d = gate.decide("swing", "paper", self.VAL, self.REC_OK, 200)
+        self.assertIsNone(d["new_status"])
+        self.assertTrue(d["eligible"])
+
+    def test_paper_eligibility_needs_time_sample_and_positive_record(self):
+        self.assertFalse(gate.decide("swing", "paper", self.VAL, self.REC_OK, 30)["eligible"])
+        self.assertFalse(gate.decide("swing", "paper", self.VAL, {**self.REC_OK, "n": 10}, 200)["eligible"])
+        self.assertFalse(gate.decide("swing", "paper", self.VAL, {**self.REC_OK, "avg": -0.01}, 200)["eligible"])
+        self.assertFalse(gate.decide("swing", "paper", {"verdict": "TRADE-OFF"}, self.REC_OK, 200)["eligible"])
+        self.assertFalse(gate.decide("swing", "paper", self.VAL, {**self.REC_OK, "dd": 8.0}, 200)["eligible"])
+        # momentum: 3 months of paper is enough sample
+        self.assertTrue(gate.decide("momentum", "paper", self.VAL,
+                                    {"n": 3, "avg": 0.2, "ci_hi": 2, "dd": 1}, 95)["eligible"])
+
+    def test_live_demotions(self):
+        self.assertIsNone(gate.decide("swing", "live", self.VAL, self.REC_OK, 50)["new_status"])
+        self.assertEqual(gate.decide("swing", "live", {"verdict": "NO EDGE"}, self.REC_OK, 50)["new_status"], "paper")
+        neg = {"n": 40, "avg": -0.2, "ci_hi": -0.05, "dd": 1.0}
+        self.assertEqual(gate.decide("swing", "live", self.VAL, neg, 50)["new_status"], "paper")
+        self.assertIsNone(gate.decide("swing", "live", self.VAL, {**neg, "n": 10}, 50)["new_status"])
+        self.assertEqual(gate.decide("swing", "live", self.VAL, {**self.REC_OK, "dd": 7.6}, 50)["new_status"], "paper")
+        self.assertIsNone(gate.decide("swing", "live", self.VAL, {**self.REC_OK, "dd": 7.4}, 50)["new_status"])
+
+    def test_momentum_paper_returns(self):
+        rbs = [{"asof": "2026-01-31", "weights": {"A": 0.5}, "prices": {"A": 100, "B": 50}},
+               {"asof": "2026-02-28", "weights": {"B": 0.5}, "prices": {"A": 110, "B": 50}}]
+        m = gate.momentum_paper_returns(rbs)
+        self.assertEqual(len(m), 1)
+        # 0.5 * 10% minus entry cost (0.5 * 0.05%/2), bench = (10% + 0%) / 2
+        self.assertAlmostEqual(m[0]["port"], 0.05 - 0.5 * 0.05 / 200)
+        self.assertAlmostEqual(m[0]["bench"], 0.05)
+
+
+class PublishedFilterTests(unittest.TestCase):
+    def setUp(self):
+        import database
+        self.db = database
+        self._orig = database.DB_PATH
+        self.tmp = tempfile.mkdtemp()
+        database.DB_PATH = os.path.join(self.tmp, "t.db")
+        database.init_db()
+
+    def tearDown(self):
+        self.db.DB_PATH = self._orig
+
+    def test_registry_seed_and_published_flag(self):
+        db = self.db
+        self.assertEqual(db.get_strategy_status("intraday"), "paper")
+        self.assertEqual(db.get_strategy_status("swing"), "paper")
+        self.assertEqual(db.get_strategy_status("momentum"), "research")
+        self.assertEqual(db.get_strategy_status("unknown"), "paper")
+        self.assertFalse(db.is_strategy_live("intraday"))
+        base = {"symbol": "AAPL", "action": "BUY", "price": 100, "tp": 102, "sl": 99}
+        db.log_signal({**base, "published": False})
+        self.assertIsNone(db.get_last_signal_action("AAPL", published_only=True))
+        self.assertEqual(db.get_last_signal_action("AAPL"), "BUY")
+        db.log_signal(base)
+        self.assertEqual(db.get_last_signal_action("AAPL", published_only=True), "BUY")
+        self.assertEqual(db.get_stats(published_only=True)["total_signals"], 1)
+        self.assertEqual(db.get_stats()["total_signals"], 2)
+
+    def test_status_change_records_event(self):
+        db = self.db
+        self.assertTrue(db.set_strategy_status("swing", "live", "test", actor="t"))
+        self.assertFalse(db.set_strategy_status("swing", "live", "again"))
+        self.assertTrue(db.is_strategy_live("swing"))
+        ev = db.get_strategy_events(1)[0]
+        self.assertEqual((ev["old_status"], ev["new_status"], ev["actor"]), ("paper", "live", "t"))
+        with self.assertRaises(ValueError):
+            db.set_strategy_status("swing", "bogus", "x")
 
 
 if __name__ == "__main__":

@@ -46,7 +46,7 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 
-from edge_stats import DEFAULT_COST_PCT, market_of, summarize_r
+from edge_stats import DEFAULT_COST_PCT, market_of, max_drawdown_r, summarize_r
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(_DIR, "data", "research_cache")
@@ -379,7 +379,10 @@ def score(trades: list[dict], cost_scale: float = 1.0,
     wins = sum(1 for tr in trades if tr["outcome"] == "tp")
     s = summarize_r(rs, days, wins)
     s["gross_r"] = round(float(np.mean([tr["r"] for tr in trades])), 3)
+    s["max_dd_r"] = max_drawdown_r([r for _, r in sorted(
+        zip([tr["t"] for tr in trades], rs), key=lambda x: x[0])])
     return s
+
 
 
 def _key(c: dict) -> str:
