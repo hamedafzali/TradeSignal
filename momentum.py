@@ -71,6 +71,18 @@ def month_ends(daily_close: pd.DataFrame) -> pd.DataFrame:
     return daily_close.resample("ME").last()
 
 
+def drop_incomplete_month(daily_close: pd.DataFrame) -> pd.DataFrame:
+    """Drop the trailing calendar month if it hasn't finished yet, so the
+    last backtest month isn't a partial-month return counted as a full one."""
+    if daily_close.empty:
+        return daily_close
+    last = daily_close.index[-1]
+    if (last + pd.offsets.BDay(1)).month == last.month:
+        start = pd.Timestamp(last.year, last.month, 1, tz=last.tz)
+        return daily_close[daily_close.index < start]
+    return daily_close
+
+
 def market_index(daily_ret: pd.DataFrame) -> pd.Series:
     """Equal-weight index of the universe (daily rebalanced) — the benchmark
     level the trend filter looks at."""
@@ -124,6 +136,7 @@ def backtest(daily_close: pd.DataFrame, cfg: dict, weight_fn=None,
     info) defaults to momentum's target_weights; the engine is shared by every
     monthly portfolio strategy so they are all tested the same way."""
     weight_fn = weight_fn or target_weights
+    daily_close = drop_incomplete_month(daily_close)
     daily_ret = daily_close.pct_change(fill_method=None)
     mc = month_ends(daily_close)
     index_m = month_ends(market_index(daily_ret).to_frame("i"))["i"]

@@ -230,6 +230,15 @@ class PortfolioStrategyTests(unittest.TestCase):
         self.assertEqual(sorted(info["picks"]), ["S0", "S1", "S2"])
         self.assertAlmostEqual(w.sum(), 1.0)
 
+    def test_incomplete_month_dropped(self):
+        import momentum
+        i = pd.bdate_range("2026-09-01", "2026-11-06")
+        df = pd.DataFrame({"a": 1.0}, index=i)
+        self.assertEqual(momentum.drop_incomplete_month(df).index[-1], pd.Timestamp("2026-10-30"))
+        i = pd.bdate_range("2026-09-01", "2026-10-30")      # Oct 31 is a Saturday
+        df = pd.DataFrame({"a": 1.0}, index=i)
+        self.assertEqual(len(momentum.drop_incomplete_month(df)), len(df))
+
     def test_trend_alloc_moves_downtrends_to_cash(self):
         import trend_alloc as ta
         idx = pd.date_range("2020-01-31", periods=24, freq="ME")
